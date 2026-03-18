@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search (Modern Edition)
-// @version        5.0.0
+// @version        5.1.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, and role. Crawls member lists with CSV export.
 // @match          https://fetlife.com/*
@@ -463,7 +463,9 @@
             const nickname = card.getAttribute('data-member-card');
             if (!nickname) return null;
 
-            const text = card.textContent.trim();
+            // Normalize whitespace — card text has newlines between elements
+            // which breaks regex matching. Collapse to single spaces.
+            const text = card.textContent.replace(/\s+/g, ' ').trim();
             const img = card.querySelector('img');
             const avatar = img ? img.src : '';
 
@@ -498,50 +500,49 @@
     function parseASL(text) {
         let age = null, gender = '', genderCode = '', role = '';
 
+        // After whitespace normalization, card text looks like:
+        // "VioletteRainBrat 25F Princess Phoenix, Arizona 72 Pics · 10 Vids Follow"
+        // "grit-and-grace 55F babygirl Phoenix, Arizona 65 Pics · 4 Writings Follow"
+        // "ScottyArcher 32M Dom-leaning Sw... Phoenix, Arizona 27 Pics Follow"
+        // "hdfatryd 54 Stag Phoenix, Arizona 52 Pics · 25 Vids Follow"
+
         const genderCodes = ['CD/TV','FEM','BUT','TM','TF','TW','GF','GQ','NB','CF','CM','IS','AG','TS','TG','M','F'];
         const gcPattern = genderCodes.map(g => g.replace('/', '\\/')).join('|');
 
-        // Match: 25F Princess, 46M Kinkster, 36TW Bottom, 30FEM Dom, 54 Stag
-        const regex = new RegExp('\\b(\\d{2})(' + gcPattern + ')\\s+(.+?)(?:\\s*\\d+\\s*Pics|\\s*\\d+\\s*Vids|\\s*\\d+\\s*Writings|\\s*Follow|\\s*$)', 'i');
-        const m = text.match(regex);
+        // Step 1: Find age + gender code pattern (e.g. "25F", "36TW", "30FEM")
+        const agPattern = new RegExp('\\b(\\d{2})(' + gcPattern + ')\\b', 'i');
+        const agMatch = text.match(agPattern);
 
-        if (m) {
-            age = parseInt(m[1]);
-            genderCode = m[2].toUpperCase();
+        if (agMatch) {
+            age = parseInt(agMatch[1]);
+            genderCode = agMatch[2].toUpperCase();
             gender = GENDER_LABELS[genderCode] || genderCode;
-            role = m[3].trim()
-                .replace(/\s*(Phoenix|Scottsdale|Tempe|Mesa|[A-Z][a-z]+,\s*[A-Z]).*$/i, '')
-                .replace(/[^\x20-\x7E]/g, '')
-                .trim();
+
+            // Step 2: Extract role — it's the word(s) right after "25F "
+            // Get everything after the age+gender match
+            const afterAG = text.substring(agMatch.index + agMatch[0].length).trim();
+            // Role is everything up to the location or stats
+            // Location pattern: "City, State" or stats: "123 Pics"
+            const roleMatch = afterAG.match(/^(.+?)(?=\s+[A-Z][a-z]+,\s*[A-Z]|\s+\d+\s*Pics|\s+\d+\s*Vids|\s+\d+\s*Writings|\s+Follow\s*$|\s*$)/);
+            if (roleMatch) {
+                role = roleMatch[1].replace(/[^\x20-\x7E]/g, '').trim();
+            }
         } else {
-            // Try without role capture: just age + gender
-            const simpler = new RegExp('\\b(\\d{2})(' + gcPattern + ')\\b', 'i');
-            const m2 = text.match(simpler);
-            if (m2) {
-                age = parseInt(m2[1]);
-                genderCode = m2[2].toUpperCase();
-                gender = GENDER_LABELS[genderCode] || genderCode;
-            }
-            // Try to find age alone (e.g. "54 Stag")
-            if (age === null) {
-                const ageOnly = text.match(/\b(\d{2})\s+([\w-]+)/);
-                if (ageOnly) {
-                    const n = parseInt(ageOnly[1]);
-                    if (n >= 18 && n <= 99) {
-                        age = n;
-                        // Check if the word after is a role
-                        const maybeRole = ageOnly[2];
-                        if (ROLES.some(r => r.toLowerCase() === maybeRole.toLowerCase())) {
-                            role = maybeRole;
-                        }
-                    }
+            // No gender code — try "54 Stag" pattern (age + space + role)
+            const ageRole = text.match(/\b(\d{2})\s+([\w][\w\s-]*?)(?=\s+[A-Z][a-z]+,\s*[A-Z]|\s+\d+\s*Pics|\s+Follow|\s*$)/);
+            if (ageRole) {
+                const n = parseInt(ageRole[1]);
+                if (n >= 18 && n <= 99) {
+                    age = n;
+                    role = ageRole[2].replace(/[^\x20-\x7E]/g, '').trim();
                 }
             }
-            // Find role in text
-            if (!role) {
-                for (const r of ROLES) {
-                    if (text.includes(r)) { role = r; break; }
-                }
+        }
+
+        // Step 3: If we still don't have a role, look for known role keywords
+        if (!role) {
+            for (const r of ROLES) {
+                if (text.includes(r)) { role = r; break; }
             }
         }
 
