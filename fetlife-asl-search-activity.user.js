@@ -20,8 +20,10 @@
     //   - Scrape → save → navigate → repeat
     //
     // Phase 2: Activity check (new)
-    //   - For each Phase 1 match, fetch() the profile page HTML
-    //   - Parse the "Latest Activity" section for the most recent date
+    //   - For each Phase 1 match, fetch() the main profile page HTML
+    //   - The /activity sub-page is client-rendered (empty shell via fetch),
+    //     but the main profile page includes "Latest Activity" server-rendered
+    //   - Parse <time datetime="..."> elements for the most recent date
     //   - Filter out profiles whose last activity is older than threshold
     //   - Uses random delays (3-8s) between fetches to look natural
     //   - Sequential requests only — never parallel
@@ -544,36 +546,44 @@
     }
 
     function parseActivityDate(html) {
-        // Activity page uses <time datetime="2026-03-18T17:31:21.374Z"> elements.
-        // The first one on the page is the most recent activity.
-        const match = html.match(/<time\s+datetime="([^"]+)"/);
-        if (!match) return null;
-
-        const parsed = new Date(match[1]);
+        // The profile page contains a "Latest Activity" section with
+        // <time datetime="2026-03-15T18:29:32Z" data-smart-timestamp="..."> elements.
+        // We look for <time> elements with data-smart-timestamp (activity timestamps)
+        // to avoid matching unrelated <time> tags. The first match is the most recent.
+        const match = html.match(/<time\s[^>]*?datetime="([^"]+)"[^>]*?data-smart-timestamp/);
+        if (match) {
+            const parsed = new Date(match[1]);
+            if (!isNaN(parsed.getTime())) return parsed;
+        }
+        // Fallback: try any <time datetime="..."> element
+        const fallback = html.match(/<time\s+datetime="([^"]+)"/);
+        if (!fallback) return null;
+        const parsed = new Date(fallback[1]);
         if (isNaN(parsed.getTime())) return null;
-
         return parsed;
     }
 
     async function fetchActivityDate(profileUrl) {
         try {
-            // Fetch the activity page, not the profile page
-            const activityUrl = profileUrl.replace(/\/?$/, '/activity');
-            const resp = await fetch(activityUrl, {
+            // Fetch the profile page directly — NOT the /activity sub-page.
+            // FetLife is a Vue SPA and the /activity page is client-rendered,
+            // so fetch() returns an empty shell. However, the main profile page
+            // includes the "Latest Activity" section server-rendered with <time> elements.
+            const resp = await fetch(profileUrl, {
                 credentials: 'same-origin',
                 headers: {
                     'Accept': 'text/html,application/xhtml+xml',
                 }
             });
             if (!resp.ok) {
-                console.log('[ASL] Activity fetch failed:', resp.status, profileUrl);
+                console.log('[ASL] Profile fetch failed:', resp.status, profileUrl);
                 return { date: null, error: resp.status };
             }
             const html = await resp.text();
             const date = parseActivityDate(html);
             return { date, error: null };
         } catch (e) {
-            console.error('[ASL] Activity fetch error:', e, profileUrl);
+            console.error('[ASL] Profile fetch error:', e, profileUrl);
             return { date: null, error: e.message };
         }
     }
