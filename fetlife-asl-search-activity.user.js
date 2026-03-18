@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        6.3.0
+// @version        6.4.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -24,7 +24,9 @@
     //   - FetLife returns JSON with story_groups[].stories[].created_at timestamps
     //   - The most recent created_at across all stories = last activity date
     //   - Filter out profiles whose last activity is older than threshold
-    //   - Uses random delays (3-8s) between fetches to look natural
+    //   - Uses random delays between fetches to look natural (user-configurable)
+    //   - Exponential backoff on rate limits (429/503) with automatic retries
+    //   - Adaptive throttling: base delay increases when rate-limited frequently
     //   - Sequential requests only — never parallel
     //
 
@@ -187,6 +189,17 @@
                         <label class="fl" style="margin:0;white-space:nowrap">Check last</label>
                         <input type="number" id="asl-check-limit" min="1" max="9999" value="100" style="width:70px;margin:0">
                         <label class="fl" style="margin:0;white-space:nowrap">unchecked</label>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Delay</label>
+                        <input type="number" id="asl-act-min-delay" min="3" max="60" value="5" style="width:55px;margin:0">
+                        <label class="fl" style="margin:0;white-space:nowrap">to</label>
+                        <input type="number" id="asl-act-max-delay" min="5" max="120" value="12" style="width:55px;margin:0">
+                        <label class="fl" style="margin:0;white-space:nowrap">sec between checks</label>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Max retries per profile</label>
+                        <input type="number" id="asl-act-retries" min="0" max="10" value="3" style="width:55px;margin:0">
                     </div>
                     <button class="asl-b" id="asl-check-activity">Check Activity Now</button>
                     <button class="asl-b" id="asl-stop-activity">Stop Activity Check</button>
@@ -546,10 +559,6 @@
 
     async function fetchActivityDate(profileUrl) {
         try {
-            // Use FetLife's JSON API: /{nickname}/activity returns activity feed JSON
-            // with story_groups[].stories[].created_at timestamps.
-            // This works reliably unlike HTML scraping (FetLife is a Vue SPA that
-            // returns empty shells for HTML fetches).
             const activityUrl = profileUrl.replace(/\/?$/, '/activity');
             const resp = await fetch(activityUrl, {
                 credentials: 'same-origin',
@@ -559,11 +568,10 @@
             });
             if (!resp.ok) {
                 console.log('[ASL] Activity fetch failed:', resp.status, profileUrl);
-                return { date: null, error: resp.status };
+                return { date: null, error: resp.status, rateLimited: (resp.status === 429 || resp.status === 503) };
             }
             const data = await resp.json();
 
-            // Find the most recent created_at from any story in any story_group
             let latest = null;
             if (data.story_groups) {
                 for (const group of data.story_groups) {
@@ -577,10 +585,10 @@
                     }
                 }
             }
-            return { date: latest, error: null };
+            return { date: latest, error: null, rateLimited: false };
         } catch (e) {
             console.error('[ASL] Activity fetch error:', e, profileUrl);
-            return { date: null, error: e.message };
+            return { date: null, error: e.message, rateLimited: false };
         }
     }
 
@@ -591,7 +599,6 @@
             return;
         }
 
-        // Get the activity threshold from the dropdown
         const activityDays = parseInt(document.getElementById('asl-activity').value) || 90;
         if (activityDays === 0) {
             setStatus('Activity filter set to "Any" — nothing to check.');
@@ -601,7 +608,6 @@
         const cutoffDate = new Date();
         cutoffDate.setDate(cutoffDate.getDate() - activityDays);
 
-        // Find profiles that haven't been checked yet, limited by batch size
         const allUnchecked = results.filter(p => !p.activityChecked);
         if (allUnchecked.length === 0) {
             setStatus('All profiles already checked. Filtering...');
@@ -609,12 +615,15 @@
             return;
         }
         const checkLimit = parseInt(document.getElementById('asl-check-limit').value) || 100;
-        // Take the LAST N unchecked (bottom of list = most recently added results)
         const unchecked = allUnchecked.slice(-checkLimit);
+
+        // User-configurable delays (in seconds → milliseconds)
+        const minDelayMs = (parseInt(document.getElementById('asl-act-min-delay').value) || 5) * 1000;
+        const maxDelayMs = (parseInt(document.getElementById('asl-act-max-delay').value) || 12) * 1000;
+        const maxRetries = parseInt(document.getElementById('asl-act-retries').value) ?? 3;
 
         activityCheckAbort = false;
 
-        // Show UI
         const progressEl = document.getElementById('asl-activity-progress');
         const checkBtn = document.getElementById('asl-check-activity');
         const stopBtn = document.getElementById('asl-stop-activity');
@@ -627,6 +636,8 @@
         let active = 0;
         let inactive = 0;
         let errors = 0;
+        let consecutiveRateLimits = 0;  // Track consecutive rate limits for adaptive throttling
+        let currentBackoff = 30000;      // Start backoff at 30s, doubles each consecutive hit
 
         for (const p of unchecked) {
             if (activityCheckAbort) {
@@ -644,19 +655,50 @@
                 <div class="bar"><div class="fill" style="width:${Math.round(checked/total*100)}%"></div></div>
             `;
 
-            const result = await fetchActivityDate(p.url);
+            // Retry loop with exponential backoff for rate limits
+            let result = null;
+            let attempts = 0;
+            while (attempts <= maxRetries) {
+                result = await fetchActivityDate(p.url);
+
+                if (!result.rateLimited) {
+                    // Success or non-rate-limit error — reset backoff
+                    consecutiveRateLimits = 0;
+                    currentBackoff = 30000;
+                    break;
+                }
+
+                // Rate limited — exponential backoff with retry
+                consecutiveRateLimits++;
+                attempts++;
+
+                if (attempts > maxRetries) {
+                    console.log('[ASL] Max retries reached for', p.nickname);
+                    break;
+                }
+
+                // Exponential backoff: 30s, 60s, 120s, 240s (capped at 5 min)
+                currentBackoff = Math.min(currentBackoff * 2, 300000);
+                const waitSec = Math.round(currentBackoff / 1000);
+                console.log(`[ASL] Rate limited (attempt ${attempts}/${maxRetries}), waiting ${waitSec}s...`);
+                progressEl.innerHTML = `
+                    Checking activity: <strong>${checked}</strong> / ${total}
+                    &nbsp;— ${esc(p.nickname)}
+                    <br><span style="color:#cc6">Rate limited — waiting ${waitSec}s before retry ${attempts}/${maxRetries}...</span>
+                    <div class="bar"><div class="fill" style="width:${Math.round(checked/total*100)}%"></div></div>
+                `;
+                await sleep(currentBackoff);
+
+                if (activityCheckAbort) break;
+            }
+
+            if (activityCheckAbort) break;
 
             p.activityChecked = true;
             if (result.error) {
                 p.lastActivity = null;
                 p.activityError = result.error;
                 errors++;
-                // On rate limit (429) or server error, wait longer
-                if (result.error === 429 || result.error === 503) {
-                    console.log('[ASL] Rate limited, waiting 30s...');
-                    progressEl.innerHTML += '<br><span style="color:#cc6">Rate limited — waiting 30 seconds...</span>';
-                    await sleep(30000);
-                }
             } else if (result.date) {
                 p.lastActivity = result.date.toISOString();
                 if (result.date >= cutoffDate) {
@@ -665,22 +707,29 @@
                     inactive++;
                 }
             } else {
-                p.lastActivity = null; // No activity section found
+                p.lastActivity = null;
                 inactive++;
             }
 
-            // Save after each check so progress isn't lost
             saveResults(results);
 
-            // Random delay between 3-8 seconds to look natural
+            // Adaptive delay: increase base delay when getting rate-limited frequently
             if (checked < total && !activityCheckAbort) {
-                const delay = randomDelay(3000, 8000);
-                console.log('[ASL] Next activity check in', Math.round(delay/1000), 'seconds');
+                // If we've been rate-limited recently, add extra delay proportional to consecutive hits
+                const adaptiveExtra = consecutiveRateLimits > 0
+                    ? Math.min(consecutiveRateLimits * 2000, 20000)
+                    : 0;
+                const delay = randomDelay(minDelayMs, maxDelayMs) + adaptiveExtra;
+                const delaySec = Math.round(delay / 1000);
+                if (adaptiveExtra > 0) {
+                    console.log(`[ASL] Next check in ${delaySec}s (includes +${Math.round(adaptiveExtra/1000)}s adaptive throttle)`);
+                } else {
+                    console.log('[ASL] Next activity check in', delaySec, 'seconds');
+                }
                 await sleep(delay);
             }
         }
 
-        // Done
         stopBtn.style.display = 'none';
         const remaining = allUnchecked.length - checked;
         const msg = activityCheckAbort
