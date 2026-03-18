@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search (Modern Edition)
-// @version        5.3.0
+// @version        5.4.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, and role. Crawls member lists with CSV export.
 // @match          https://fetlife.com/*
