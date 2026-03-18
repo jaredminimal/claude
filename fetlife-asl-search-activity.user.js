@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        6.0.1
+// @version        6.1.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -182,6 +182,11 @@
                     <div id="asl-status"></div>
                 </div>
                 <div class="asl-tab" id="asl-t-results">
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Check first</label>
+                        <input type="number" id="asl-check-limit" min="1" max="9999" value="100" style="width:70px;margin:0">
+                        <label class="fl" style="margin:0;white-space:nowrap">unchecked</label>
+                    </div>
                     <button class="asl-b" id="asl-check-activity">Check Activity Now</button>
                     <button class="asl-b" id="asl-stop-activity">Stop Activity Check</button>
                     <div id="asl-activity-progress"></div>
@@ -539,30 +544,45 @@
     }
 
     function parseActivityDate(html) {
-        // Look for the "Latest Activity" section and grab dates from activity entries
-        // Dates appear in formats like: "Feb 5, 2025", "Oct 30, 2024", "Jun 18, 2024"
-        // They follow patterns like: "username followed: Feb 5, 2025"
-        //                            "username loved someone's picture: Oct 30, 2024"
-        //                            "username is into Something. Feb 27, 2025"
+        // Look for the "Latest Activity" section and grab the most recent date.
+        // Dates can appear as:
+        //   Absolute: "Feb 5, 2025", "Oct 30, 2024"
+        //   Relative: "about 2 hours ago", "3 days ago", "1 month ago", "about 1 year ago"
 
-        // Find the Latest Activity heading
         const activityIdx = html.indexOf('Latest Activity');
         if (activityIdx === -1) return null;
 
-        // Search within the activity section for date patterns
         const activitySection = html.substring(activityIdx, activityIdx + 3000);
 
-        // Match date patterns: "Mon DD, YYYY" — the first one is the most recent
+        // Try relative dates first — these indicate very recent activity
+        // Patterns: "about 2 hours ago", "3 days ago", "1 month ago", "about 1 year ago"
+        const relMatch = activitySection.match(/(?:about\s+)?(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago/i);
+        if (relMatch) {
+            const num = parseInt(relMatch[1]);
+            const unit = relMatch[2].toLowerCase();
+            const now = new Date();
+            switch (unit) {
+                case 'second': now.setSeconds(now.getSeconds() - num); break;
+                case 'minute': now.setMinutes(now.getMinutes() - num); break;
+                case 'hour':   now.setHours(now.getHours() - num); break;
+                case 'day':    now.setDate(now.getDate() - num); break;
+                case 'week':   now.setDate(now.getDate() - (num * 7)); break;
+                case 'month':  now.setMonth(now.getMonth() - num); break;
+                case 'year':   now.setFullYear(now.getFullYear() - num); break;
+            }
+            return now;
+        }
+
+        // Try absolute dates: "Mon DD, YYYY"
         const months = 'Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
         const dateRe = new RegExp('(?:' + months + ')\\s+\\d{1,2},\\s+\\d{4}');
-        const match = activitySection.match(dateRe);
+        const absMatch = activitySection.match(dateRe);
+        if (absMatch) {
+            const parsed = new Date(absMatch[0]);
+            if (!isNaN(parsed.getTime())) return parsed;
+        }
 
-        if (!match) return null;
-
-        const parsed = new Date(match[0]);
-        if (isNaN(parsed.getTime())) return null;
-
-        return parsed;
+        return null;
     }
 
     async function fetchActivityDate(profileUrl) {
@@ -603,13 +623,15 @@
         const cutoffDate = new Date();
         cutoffDate.setDate(cutoffDate.getDate() - activityDays);
 
-        // Find profiles that haven't been checked yet
-        const unchecked = results.filter(p => !p.activityChecked);
-        if (unchecked.length === 0) {
+        // Find profiles that haven't been checked yet, limited by batch size
+        const allUnchecked = results.filter(p => !p.activityChecked);
+        if (allUnchecked.length === 0) {
             setStatus('All profiles already checked. Filtering...');
             loadAndDisplayResults();
             return;
         }
+        const checkLimit = parseInt(document.getElementById('asl-check-limit').value) || 100;
+        const unchecked = allUnchecked.slice(0, checkLimit);
 
         activityCheckAbort = false;
 
@@ -681,9 +703,10 @@
 
         // Done
         stopBtn.style.display = 'none';
+        const remaining = allUnchecked.length - checked;
         const msg = activityCheckAbort
-            ? `Activity check paused — ${checked}/${total} checked. ${active} active, ${inactive} inactive.`
-            : `Activity check complete! ${active} active, ${inactive} inactive out of ${total} checked.`;
+            ? `Activity check paused — ${checked}/${total} checked. ${active} active, ${inactive} inactive.${remaining > 0 ? ' ' + remaining + ' still unchecked.' : ''}`
+            : `Activity check complete! ${active} active, ${inactive} inactive out of ${total} checked.${remaining > 0 ? ' ' + remaining + ' still unchecked.' : ''}`;
         progressEl.innerHTML = `<strong>${msg}</strong>`;
         setStatus(msg);
         loadAndDisplayResults();
