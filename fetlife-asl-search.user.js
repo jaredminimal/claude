@@ -288,10 +288,10 @@
             delay: (parseInt(document.getElementById('asl-spd').value) || 5) * 1000,
         };
 
-        // Start from current page or continue from where last search ended, whichever is further
+        // Always start from the current page
         const prog = getProgress();
         const currentPage = getCurrentPageNumber();
-        const startPage = Math.max(currentPage, prog.lastPageCrawled + 1);
+        const startPage = currentPage;
         const batch = prog.batchCount + 1;
         const endPage = startPage + pagesToSearch - 1;
 
@@ -372,16 +372,18 @@
                 return;
             }
 
-            // Filter and save matches
+            // Filter and save matches (deduplicate by nickname)
             const results = getSavedResults();
+            const existing = new Set(results.map(r => r.nickname));
             const params = s.params;
             let newMatches = 0;
             for (const p of profiles) {
                 s.scanned++;
-                if (matchesFilter(p, params)) {
+                if (matchesFilter(p, params) && !existing.has(p.nickname)) {
                     p.batch = s.batch;
                     p.batchPages = s.startPage + '-' + s.endPage;
                     results.push(p);
+                    existing.add(p.nickname);
                     newMatches++;
                 }
             }
