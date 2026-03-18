@@ -288,9 +288,10 @@
             delay: (parseInt(document.getElementById('asl-spd').value) || 5) * 1000,
         };
 
-        // Continue from where we left off
+        // Start from current page or continue from where last search ended, whichever is further
         const prog = getProgress();
-        const startPage = prog.lastPageCrawled + 1;
+        const currentPage = getCurrentPageNumber();
+        const startPage = Math.max(currentPage, prog.lastPageCrawled + 1);
         const batch = prog.batchCount + 1;
         const endPage = startPage + pagesToSearch - 1;
 
