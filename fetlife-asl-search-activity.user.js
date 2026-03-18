@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        6.1.1
+// @version        6.2.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -544,50 +544,22 @@
     }
 
     function parseActivityDate(html) {
-        // Look for the "Latest Activity" section and grab the most recent date.
-        // Dates can appear as:
-        //   Absolute: "Feb 5, 2025", "Oct 30, 2024"
-        //   Relative: "about 2 hours ago", "3 days ago", "1 month ago", "about 1 year ago"
+        // Activity page uses <time datetime="2026-03-18T17:31:21.374Z"> elements.
+        // The first one on the page is the most recent activity.
+        const match = html.match(/<time\s+datetime="([^"]+)"/);
+        if (!match) return null;
 
-        const activityIdx = html.indexOf('Latest Activity');
-        if (activityIdx === -1) return null;
+        const parsed = new Date(match[1]);
+        if (isNaN(parsed.getTime())) return null;
 
-        const activitySection = html.substring(activityIdx, activityIdx + 3000);
-
-        // Try relative dates first — these indicate very recent activity
-        // Patterns: "about 2 hours ago", "3 days ago", "1 month ago", "about 1 year ago"
-        const relMatch = activitySection.match(/(?:about\s+)?(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago/i);
-        if (relMatch) {
-            const num = parseInt(relMatch[1]);
-            const unit = relMatch[2].toLowerCase();
-            const now = new Date();
-            switch (unit) {
-                case 'second': now.setSeconds(now.getSeconds() - num); break;
-                case 'minute': now.setMinutes(now.getMinutes() - num); break;
-                case 'hour':   now.setHours(now.getHours() - num); break;
-                case 'day':    now.setDate(now.getDate() - num); break;
-                case 'week':   now.setDate(now.getDate() - (num * 7)); break;
-                case 'month':  now.setMonth(now.getMonth() - num); break;
-                case 'year':   now.setFullYear(now.getFullYear() - num); break;
-            }
-            return now;
-        }
-
-        // Try absolute dates: "Mon DD, YYYY"
-        const months = 'Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
-        const dateRe = new RegExp('(?:' + months + ')\\s+\\d{1,2},\\s+\\d{4}');
-        const absMatch = activitySection.match(dateRe);
-        if (absMatch) {
-            const parsed = new Date(absMatch[0]);
-            if (!isNaN(parsed.getTime())) return parsed;
-        }
-
-        return null;
+        return parsed;
     }
 
     async function fetchActivityDate(profileUrl) {
         try {
-            const resp = await fetch(profileUrl, {
+            // Fetch the activity page, not the profile page
+            const activityUrl = profileUrl.replace(/\/?$/, '/activity');
+            const resp = await fetch(activityUrl, {
                 credentials: 'same-origin',
                 headers: {
                     'Accept': 'text/html,application/xhtml+xml',
