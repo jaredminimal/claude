@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search (Modern Edition)
-// @version        5.1.0
+// @version        5.2.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, and role. Crawls member lists with CSV export.
 // @match          https://fetlife.com/*
@@ -30,9 +30,9 @@
     const RESULTS_KEY = 'asl_search_results';
 
     // Gender codes used by FetLife (from live DOM inspection)
-    const GENDERS = ['M','F','TM','TF','TW','GF','GQ','NB','CD/TV','FEM','BUT','IS','AG','TS','CF','CM'];
+    const GENDERS = ['M','F','W','TM','TF','TW','GF','GQ','NB','CD/TV','FEM','BUT','IS','AG','TS','CF','CM'];
     const GENDER_LABELS = {
-        'M':'Male','F':'Female','TM':'Trans Man','TF':'Trans Female','TW':'Trans Woman',
+        'M':'Male','F':'Female','W':'Woman','TM':'Trans Man','TF':'Trans Female','TW':'Trans Woman',
         'GF':'Gender Fluid','GQ':'Genderqueer','NB':'Non-binary','CD/TV':'Crossdresser',
         'FEM':'Femme','BUT':'Butch','IS':'Intersex','AG':'Agender','TS':'Two-spirit',
         'CF':'Cis Female','CM':'Cis Male'
@@ -463,13 +463,26 @@
             const nickname = card.getAttribute('data-member-card');
             if (!nickname) return null;
 
-            // Normalize whitespace — card text has newlines between elements
-            // which breaks regex matching. Collapse to single spaces.
-            const text = card.textContent.replace(/\s+/g, ' ').trim();
+            // Normalize whitespace
+            const rawText = card.textContent.replace(/\s+/g, ' ').trim();
             const img = card.querySelector('img');
             const avatar = img ? img.src : '';
 
-            const asl = parseASL(text);
+            // CRITICAL: The text starts with the nickname concatenated directly
+            // into the age+gender. E.g. "inlovehun9432F sub Phoenix, Arizona13 Pics..."
+            // Strip the nickname from the front to get: "32F sub Phoenix, Arizona13 Pics..."
+            let infoText = rawText;
+            if (rawText.toLowerCase().startsWith(nickname.toLowerCase())) {
+                infoText = rawText.substring(nickname.length).trim();
+            }
+            // Also handle case where nickname appears with slight variation
+            // (sometimes the text repeats the nickname)
+            const nickIdx = rawText.indexOf(nickname);
+            if (nickIdx >= 0) {
+                infoText = rawText.substring(nickIdx + nickname.length).trim();
+            }
+
+            const asl = parseASL(infoText);
 
             // Location from place links
             let location = '';
@@ -483,7 +496,7 @@
                 location = parts.join(', ');
             }
             if (!location) {
-                const locMatch = text.match(/([A-Z][a-zA-Z\s]+),\s*([A-Z][a-zA-Z\s]+)/);
+                const locMatch = rawText.match(/([A-Z][a-zA-Z\s]+),\s*([A-Z][a-zA-Z\s]+)/);
                 if (locMatch) location = locMatch[0];
             }
 
@@ -500,46 +513,57 @@
     function parseASL(text) {
         let age = null, gender = '', genderCode = '', role = '';
 
-        // After whitespace normalization, card text looks like:
-        // "VioletteRainBrat 25F Princess Phoenix, Arizona 72 Pics · 10 Vids Follow"
-        // "grit-and-grace 55F babygirl Phoenix, Arizona 65 Pics · 4 Writings Follow"
-        // "ScottyArcher 32M Dom-leaning Sw... Phoenix, Arizona 27 Pics Follow"
-        // "hdfatryd 54 Stag Phoenix, Arizona 52 Pics · 25 Vids Follow"
+        // After stripping the nickname, text looks like:
+        //   "32F sub Phoenix, Arizona13 Pics·1 Vid·2 WritingsFollow"
+        //   "48M Evolving Phoenix, Arizona29 Pics·8 Vids·1 WritingFollow"
+        //   "26W Exhibitionist Phoenix, Arizona11 Pics·1 WritingFollow"
+        //   "52F Exploring Phoenix, Arizona9 PicsFollow"
+        //   "54M Kinkster Phoenix, Arizona83 Pics·1 Vid·2 WritingsFollow"
+        //   "54 Stag Phoenix, Arizona52 Pics·25 VidsFollow"
+        //
+        // Pattern: {age}{genderCode} {role} {location}{stats}Follow
 
-        const genderCodes = ['CD/TV','FEM','BUT','TM','TF','TW','GF','GQ','NB','CF','CM','IS','AG','TS','TG','M','F'];
+        // Gender codes — W added (seen in live data), longest first
+        const genderCodes = ['CD/TV','FEM','BUT','TM','TF','TW','GF','GQ','NB','CF','CM','IS','AG','TS','TG','W','M','F'];
         const gcPattern = genderCodes.map(g => g.replace('/', '\\/')).join('|');
 
-        // Step 1: Find age + gender code pattern (e.g. "25F", "36TW", "30FEM")
-        const agPattern = new RegExp('\\b(\\d{2})(' + gcPattern + ')\\b', 'i');
-        const agMatch = text.match(agPattern);
+        // Text now starts with age+gender since nickname is stripped
+        // Match at the START of the text: digits + gender code
+        const agMatch = text.match(new RegExp('^(\\d{2,3})(' + gcPattern + ')\\s+', 'i'));
 
         if (agMatch) {
             age = parseInt(agMatch[1]);
             genderCode = agMatch[2].toUpperCase();
             gender = GENDER_LABELS[genderCode] || genderCode;
 
-            // Step 2: Extract role — it's the word(s) right after "25F "
-            // Get everything after the age+gender match
-            const afterAG = text.substring(agMatch.index + agMatch[0].length).trim();
-            // Role is everything up to the location or stats
-            // Location pattern: "City, State" or stats: "123 Pics"
-            const roleMatch = afterAG.match(/^(.+?)(?=\s+[A-Z][a-z]+,\s*[A-Z]|\s+\d+\s*Pics|\s+\d+\s*Vids|\s+\d+\s*Writings|\s+Follow\s*$|\s*$)/);
+            // Everything after age+gender+space is: "role location stats Follow"
+            const rest = text.substring(agMatch[0].length);
+
+            // Role = text up to first "City, State" pattern or digit+Pics or Follow
+            const roleMatch = rest.match(/^(.+?)(?=\s*[A-Z][a-z]+,\s*[A-Z]|\s*\d+\s*Pics|\s*\d+\s*Vids|\s*Follow)/);
             if (roleMatch) {
                 role = roleMatch[1].replace(/[^\x20-\x7E]/g, '').trim();
             }
         } else {
-            // No gender code — try "54 Stag" pattern (age + space + role)
-            const ageRole = text.match(/\b(\d{2})\s+([\w][\w\s-]*?)(?=\s+[A-Z][a-z]+,\s*[A-Z]|\s+\d+\s*Pics|\s+Follow|\s*$)/);
-            if (ageRole) {
-                const n = parseInt(ageRole[1]);
+            // No gender code — try "54 Stag" or just "54" at start
+            const ageOnly = text.match(/^(\d{2,3})\s+(.+?)(?=\s*[A-Z][a-z]+,\s*[A-Z]|\s*\d+\s*Pics|\s*Follow)/);
+            if (ageOnly) {
+                const n = parseInt(ageOnly[1]);
                 if (n >= 18 && n <= 99) {
                     age = n;
-                    role = ageRole[2].replace(/[^\x20-\x7E]/g, '').trim();
+                    role = ageOnly[2].replace(/[^\x20-\x7E]/g, '').trim();
+                }
+            } else {
+                // Last try: just find age digits at start
+                const justAge = text.match(/^(\d{2,3})/);
+                if (justAge) {
+                    const n = parseInt(justAge[1]);
+                    if (n >= 18 && n <= 99) age = n;
                 }
             }
         }
 
-        // Step 3: If we still don't have a role, look for known role keywords
+        // If role not found yet, look for known keywords
         if (!role) {
             for (const r of ROLES) {
                 if (text.includes(r)) { role = r; break; }
