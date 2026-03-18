@@ -1,14 +1,11 @@
 // ==UserScript==
 // @name           FetLife ASL Search (Modern Edition)
-// @version        2.0.0
+// @version        3.0.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, and role. Crawls member lists with CSV export.
 // @match          https://fetlife.com/*
-// @grant          GM_xmlhttpRequest
 // @grant          GM_addStyle
-// @grant          GM.xmlHttpRequest
 // @grant          GM.addStyle
-// @connect        fetlife.com
 // @run-at         document-idle
 // @noframes
 // ==/UserScript==
@@ -17,13 +14,9 @@
     'use strict';
 
     // ---------------------
-    // Compatibility layer
+    // Style injection
     // ---------------------
-    const gmXHR = (typeof GM !== 'undefined' && GM.xmlHttpRequest)
-        ? GM.xmlHttpRequest.bind(GM)
-        : (typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null);
-
-    const gmAddStyle = (typeof GM !== 'undefined' && GM.addStyle)
+    const addStyle = (typeof GM !== 'undefined' && GM.addStyle)
         ? GM.addStyle.bind(GM)
         : (typeof GM_addStyle !== 'undefined' ? GM_addStyle : function (css) {
             const s = document.createElement('style');
@@ -40,109 +33,65 @@
         totalScanned: 0,
         totalMatches: 0,
         currentPage: 1,
-        allResults: [],       // for CSV export
-        urlQueue: [],         // for multi-location crawling
+        allResults: [],
+        urlQueue: [],
         currentUrlIndex: 0,
     };
 
     // ---------------------
     // Styles
     // ---------------------
-    gmAddStyle(`
+    addStyle(`
         #fl-asl-toggle {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            z-index: 100000;
-            background: #c22;
-            color: #fff;
-            border: none;
-            border-radius: 50%;
-            width: 56px;
-            height: 56px;
-            font-size: 18px;
-            font-weight: 700;
-            cursor: pointer;
-            box-shadow: 0 3px 12px rgba(0,0,0,0.4);
-            transition: background 0.2s;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            line-height: 1;
+            position: fixed; bottom: 20px; right: 20px; z-index: 100000;
+            background: #c22; color: #fff; border: none; border-radius: 50%;
+            width: 56px; height: 56px; font-size: 18px; font-weight: 700;
+            cursor: pointer; box-shadow: 0 3px 12px rgba(0,0,0,0.4);
+            transition: background 0.2s; display: flex; align-items: center;
+            justify-content: center; line-height: 1;
         }
         #fl-asl-toggle:hover { background: #e33; }
 
         #fl-asl-panel {
-            position: fixed;
-            top: 10px;
-            right: 10px;
-            z-index: 100000;
-            width: 460px;
-            max-height: calc(100vh - 20px);
-            background: #1a1a2e;
-            color: #e0e0e0;
-            border: 1px solid #444;
-            border-radius: 12px;
+            position: fixed; top: 10px; right: 10px; z-index: 100000;
+            width: 460px; max-height: calc(100vh - 20px);
+            background: #1a1a2e; color: #e0e0e0;
+            border: 1px solid #444; border-radius: 12px;
             box-shadow: 0 8px 32px rgba(0,0,0,0.6);
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            font-size: 14px;
-            display: none;
-            flex-direction: column;
-            overflow: hidden;
+            font-size: 14px; display: none; flex-direction: column; overflow: hidden;
         }
         #fl-asl-panel.open { display: flex; }
 
         #fl-asl-panel .panel-header {
-            background: #c22;
-            color: #fff;
-            padding: 10px 16px;
-            font-weight: 600;
-            font-size: 15px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+            background: #c22; color: #fff; padding: 10px 16px;
+            font-weight: 600; font-size: 15px;
+            display: flex; justify-content: space-between; align-items: center;
             flex-shrink: 0;
         }
         #fl-asl-panel .panel-header button {
             background: none; border: none; color: #fff;
             font-size: 20px; cursor: pointer; padding: 0 4px;
         }
-
         #fl-asl-panel .panel-body {
-            padding: 14px;
-            overflow-y: auto;
-            flex: 1;
+            padding: 14px; overflow-y: auto; flex: 1;
         }
-
         #fl-asl-panel label.field-label {
-            display: block;
-            margin-bottom: 4px;
-            font-weight: 500;
-            color: #aaa;
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
+            display: block; margin-bottom: 4px; font-weight: 500; color: #aaa;
+            font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
         }
-
         #fl-asl-panel input[type="number"],
         #fl-asl-panel input[type="text"],
         #fl-asl-panel select,
         #fl-asl-panel textarea {
-            width: 100%;
-            padding: 7px 10px;
-            margin-bottom: 10px;
-            background: #16213e;
-            border: 1px solid #333;
-            border-radius: 6px;
-            color: #e0e0e0;
-            font-size: 13px;
-            box-sizing: border-box;
+            width: 100%; padding: 7px 10px; margin-bottom: 10px;
+            background: #16213e; border: 1px solid #333; border-radius: 6px;
+            color: #e0e0e0; font-size: 13px; box-sizing: border-box;
             font-family: inherit;
         }
         #fl-asl-panel input:focus, #fl-asl-panel select:focus, #fl-asl-panel textarea:focus {
             outline: none; border-color: #c22;
         }
-
         #fl-asl-panel .checkbox-group {
             display: flex; flex-wrap: wrap; gap: 4px 8px; margin-bottom: 10px;
             max-height: 80px; overflow-y: auto; padding: 4px;
@@ -155,16 +104,13 @@
             white-space: nowrap;
         }
         #fl-asl-panel .checkbox-group input[type="checkbox"] { accent-color: #c22; }
-
         #fl-asl-panel .row { display: flex; gap: 10px; }
         #fl-asl-panel .row > div { flex: 1; }
-
         #fl-asl-panel .section-title {
             font-size: 11px; font-weight: 600; color: #888;
             text-transform: uppercase; letter-spacing: 1px;
             margin: 10px 0 6px; border-bottom: 1px solid #333; padding-bottom: 4px;
         }
-
         #fl-asl-panel .select-helpers {
             display: flex; gap: 8px; margin-bottom: 4px;
         }
@@ -172,7 +118,6 @@
             color: #c22; font-size: 11px; cursor: pointer; text-decoration: none;
         }
         #fl-asl-panel .select-helpers a:hover { text-decoration: underline; }
-
         .fl-asl-btn {
             width: 100%; padding: 9px; border: none; border-radius: 6px;
             font-size: 14px; font-weight: 600; cursor: pointer;
@@ -185,26 +130,21 @@
         #fl-asl-btn-stop:hover { background: #777; }
         #fl-asl-btn-export { background: #2a6; color: #fff; display: none; margin-top: 6px; }
         #fl-asl-btn-export:hover { background: #3b7; }
-
         #fl-asl-status {
             margin-top: 8px; padding: 6px 10px;
             background: #16213e; border-radius: 6px;
-            font-size: 12px; color: #aaa; display: none;
-            word-break: break-word;
+            font-size: 12px; color: #aaa; display: none; word-break: break-word;
         }
-
         #fl-asl-log {
             margin-top: 6px; padding: 6px 8px;
             background: #0d1117; border-radius: 6px;
-            font-size: 11px; color: #666; display: none;
+            font-size: 11px; color: #7d8590; display: none;
             max-height: 80px; overflow-y: auto;
             font-family: monospace; word-break: break-all;
         }
-
         #fl-asl-results-count {
             margin-top: 8px; font-size: 12px; color: #888; display: none;
         }
-
         #fl-asl-results { margin-top: 8px; }
         .fl-asl-result {
             display: flex; gap: 8px; padding: 8px;
@@ -228,15 +168,11 @@
             color: #c22; text-decoration: none; font-size: 11px;
         }
         .fl-asl-result .actions a:hover { text-decoration: underline; }
-
         #fl-asl-speed { width: 100%; accent-color: #c22; margin-bottom: 8px; }
-
-        /* Tabs */
         #fl-asl-tabs { display: flex; gap: 0; margin-bottom: 10px; }
         #fl-asl-tabs button {
             flex: 1; padding: 8px 4px; background: #16213e; border: 1px solid #333;
-            color: #888; font-size: 12px; font-weight: 600; cursor: pointer;
-            transition: all 0.2s;
+            color: #888; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s;
         }
         #fl-asl-tabs button:first-child { border-radius: 6px 0 0 6px; }
         #fl-asl-tabs button:last-child { border-radius: 0 6px 6px 0; }
@@ -249,6 +185,7 @@
     // Gender / Role options
     // ---------------------
     const GENDERS = [
+        'M', 'F', 'TM', 'TF', 'GF', 'GQ', 'NB', 'TG', 'CD/TV', 'IS',
         'Male', 'Female', 'Cis Man', 'Cis Woman', 'Trans Man', 'Trans Woman',
         'Gender Fluid', 'Genderqueer', 'Non-binary', 'Transgender',
         'Crossdresser/Transvestite', 'Intersex', 'Two-spirit', 'Agender',
@@ -264,68 +201,52 @@
         'Owner', 'Pet', 'Primal', 'Primal Hunter', 'Primal Prey',
         'Degrader', 'Degradee', 'Boss', 'Princess', 'Doll',
         'Puppy', 'Kitten', 'Pony', 'Captain', 'Swinger', 'Vanilla',
-        'Unsure', 'Not Applicable',
+        'Unsure', 'Not Applicable', 'Stag', 'Vixen', 'Dom-leaning Switch',
+        'Sub-leaning Switch', 'babygirl', 'babyboy',
     ];
 
     // ---------------------
     // Build UI
     // ---------------------
     function buildUI() {
-        // Floating toggle button
         const toggle = document.createElement('button');
         toggle.id = 'fl-asl-toggle';
         toggle.textContent = 'ASL';
         toggle.title = 'FetLife ASL Search';
         document.body.appendChild(toggle);
 
-        // Panel
         const panel = document.createElement('div');
         panel.id = 'fl-asl-panel';
         panel.innerHTML = `
             <div class="panel-header">
-                <span>ASL Search v2</span>
+                <span>ASL Search v3</span>
                 <button id="fl-asl-close" title="Close">&times;</button>
             </div>
             <div class="panel-body">
-
                 <div id="fl-asl-tabs">
                     <button class="active" data-tab="search">Search</button>
                     <button data-tab="results">Results</button>
                     <button data-tab="log">Debug Log</button>
                 </div>
 
-                <!-- SEARCH TAB -->
                 <div class="fl-asl-tab-content active" id="fl-asl-tab-search">
-
                     <div class="section-title">Where to Search</div>
                     <label class="field-label">Mode</label>
                     <select id="fl-asl-source">
-                        <option value="thispage">This Page (auto-detect member list)</option>
-                        <option value="url">Paste a FetLife URL</option>
+                        <option value="thispage">This Page (auto-detect kinksters list)</option>
+                        <option value="url">Paste FetLife URL(s)</option>
                         <option value="search">Search by Keyword</option>
-                        <option value="discover">Discover from My Profile Location</option>
                     </select>
-
                     <div id="fl-asl-source-url" style="display:none;">
                         <label class="field-label">URL(s) - one per line</label>
-                        <textarea id="fl-asl-url" rows="3" placeholder="https://fetlife.com/administrative_areas/223/kinksters&#10;https://fetlife.com/cities/4567/kinksters"></textarea>
+                        <textarea id="fl-asl-url" rows="3" placeholder="https://fetlife.com/p/united-states/arizona/phoenix/kinksters"></textarea>
                     </div>
-
                     <div id="fl-asl-source-search" style="display:none;">
                         <label class="field-label">Keyword</label>
                         <input type="text" id="fl-asl-keyword" placeholder="e.g. a name or keyword">
                     </div>
 
-                    <div id="fl-asl-source-discover" style="display:none;">
-                        <p style="font-size:12px;color:#888;margin:0 0 8px;">
-                            This will look at your profile to find your location, then crawl that area's member list.
-                            You can also click your city/state/country on any FetLife profile to navigate there,
-                            then use "This Page" mode.
-                        </p>
-                    </div>
-
                     <div class="section-title">Filters</div>
-
                     <div class="row">
                         <div>
                             <label class="field-label">Min Age</label>
@@ -355,7 +276,6 @@
                     <div class="section-title">Speed</div>
                     <label class="field-label">Delay: <span id="fl-asl-speed-label">4</span>s between requests</label>
                     <input type="range" id="fl-asl-speed" min="2" max="15" value="4" step="1">
-
                     <label class="field-label">Max pages per URL</label>
                     <input type="number" id="fl-asl-max-pages" min="1" max="500" value="50">
 
@@ -364,17 +284,15 @@
                     <div id="fl-asl-status"></div>
                 </div>
 
-                <!-- RESULTS TAB -->
                 <div class="fl-asl-tab-content" id="fl-asl-tab-results">
                     <button class="fl-asl-btn" id="fl-asl-btn-export">Export to CSV</button>
                     <div id="fl-asl-results-count"></div>
                     <div id="fl-asl-results"></div>
                 </div>
 
-                <!-- DEBUG TAB -->
                 <div class="fl-asl-tab-content" id="fl-asl-tab-log">
                     <p style="font-size:11px;color:#666;margin:0 0 6px;">
-                        Debug log showing what the script sees. Useful for troubleshooting.
+                        Shows what the script sees. Useful for troubleshooting.
                     </p>
                     <div id="fl-asl-log" style="display:block;max-height:none;height:400px;"></div>
                 </div>
@@ -392,29 +310,21 @@
             });
         });
 
-        // Toggle
         toggle.addEventListener('click', () => panel.classList.toggle('open'));
         document.getElementById('fl-asl-close').addEventListener('click', () => panel.classList.remove('open'));
 
-        // Source mode toggle
-        const sourceSelect = document.getElementById('fl-asl-source');
-        sourceSelect.addEventListener('change', () => {
-            document.getElementById('fl-asl-source-url').style.display = sourceSelect.value === 'url' ? '' : 'none';
-            document.getElementById('fl-asl-source-search').style.display = sourceSelect.value === 'search' ? '' : 'none';
-            document.getElementById('fl-asl-source-discover').style.display = sourceSelect.value === 'discover' ? '' : 'none';
+        document.getElementById('fl-asl-source').addEventListener('change', function () {
+            document.getElementById('fl-asl-source-url').style.display = this.value === 'url' ? '' : 'none';
+            document.getElementById('fl-asl-source-search').style.display = this.value === 'search' ? '' : 'none';
         });
 
-        // Speed slider
-        const speedSlider = document.getElementById('fl-asl-speed');
-        speedSlider.addEventListener('input', () => {
-            document.getElementById('fl-asl-speed-label').textContent = speedSlider.value;
+        document.getElementById('fl-asl-speed').addEventListener('input', function () {
+            document.getElementById('fl-asl-speed-label').textContent = this.value;
         });
 
-        // Select All / None helpers
         addSelectHelpers('fl-asl-genders', 'fl-asl-gender-helpers');
         addSelectHelpers('fl-asl-roles', 'fl-asl-role-helpers');
 
-        // Buttons
         document.getElementById('fl-asl-btn-search').addEventListener('click', startSearch);
         document.getElementById('fl-asl-btn-stop').addEventListener('click', stopSearch);
         document.getElementById('fl-asl-btn-export').addEventListener('click', exportCSV);
@@ -423,16 +333,19 @@
     function addSelectHelpers(checkboxGroupId, helperId) {
         const container = document.getElementById(checkboxGroupId);
         const helper = document.getElementById(helperId);
-        const btnAll = document.createElement('a');
-        btnAll.textContent = 'All';
-        btnAll.addEventListener('click', e => { e.preventDefault(); container.querySelectorAll('input').forEach(cb => cb.checked = true); });
-        const btnNone = document.createElement('a');
-        btnNone.textContent = 'None';
-        btnNone.addEventListener('click', e => { e.preventDefault(); container.querySelectorAll('input').forEach(cb => cb.checked = false); });
-        const btnInvert = document.createElement('a');
-        btnInvert.textContent = 'Invert';
-        btnInvert.addEventListener('click', e => { e.preventDefault(); container.querySelectorAll('input').forEach(cb => cb.checked = !cb.checked); });
-        helper.append(btnAll, btnNone, btnInvert);
+        ['All', 'None', 'Invert'].forEach(label => {
+            const a = document.createElement('a');
+            a.textContent = label;
+            a.addEventListener('click', e => {
+                e.preventDefault();
+                container.querySelectorAll('input').forEach(cb => {
+                    if (label === 'All') cb.checked = true;
+                    else if (label === 'None') cb.checked = false;
+                    else cb.checked = !cb.checked;
+                });
+            });
+            helper.appendChild(a);
+        });
     }
 
     // ---------------------
@@ -444,7 +357,7 @@
         const time = new Date().toLocaleTimeString();
         el.textContent += `[${time}] ${msg}\n`;
         el.scrollTop = el.scrollHeight;
-        console.log('[ASL Search]', msg);
+        console.log('[ASL]', msg);
     }
 
     function updateStatus(msg) {
@@ -461,8 +374,8 @@
         return {
             ageMin: parseInt(document.getElementById('fl-asl-age-min').value) || 18,
             ageMax: parseInt(document.getElementById('fl-asl-age-max').value) || 99,
-            genders: [...document.querySelectorAll('#fl-asl-genders input:checked')].map(cb => cb.value.toLowerCase()),
-            roles: [...document.querySelectorAll('#fl-asl-roles input:checked')].map(cb => cb.value.toLowerCase()),
+            genders: [...document.querySelectorAll('#fl-asl-genders input:checked')].map(cb => cb.value),
+            roles: [...document.querySelectorAll('#fl-asl-roles input:checked')].map(cb => cb.value),
             locationFilter: document.getElementById('fl-asl-location').value.trim().toLowerCase(),
         };
     }
@@ -492,35 +405,36 @@
             const raw = document.getElementById('fl-asl-url').value.trim();
             if (!raw) { alert('Please enter one or more URLs.'); return; }
             const urls = raw.split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
-            if (urls.length === 0) { alert('No valid URLs found. Each line should start with https://'); return; }
+            if (urls.length === 0) { alert('No valid URLs. Each line should start with https://'); return; }
             callback(urls);
-            return;
-        }
-
-        if (source === 'discover') {
-            discoverLocationFromProfile(callback);
             return;
         }
 
         // 'thispage' mode
         const url = detectMemberListURL();
-        if (url) {
-            callback([url]);
-        }
+        if (url) callback([url]);
     }
 
     function detectMemberListURL() {
         const loc = window.location.href;
-        log('Detecting member list from current URL: ' + loc);
+        log('Detecting from URL: ' + loc);
 
-        // Already on a kinksters/members/friends page
-        if (/\/(kinksters|group_memberships|rsvps|friends)/.test(loc)) {
+        // New /p/ format: /p/country/state/city/kinksters
+        if (/\/p\/.*\/kinksters/.test(loc) || /\/kinksters/.test(loc) ||
+            /\/group_memberships/.test(loc) || /\/rsvps/.test(loc) || /\/friends/.test(loc)) {
             const base = loc.split('?')[0].split('#')[0];
-            log('Already on a member list page: ' + base);
+            log('On a member list page: ' + base);
             return base;
         }
 
-        // On a location/group/event/fetish page — append the members endpoint
+        // On a place page without /kinksters
+        if (/\/p\//.test(loc)) {
+            const base = loc.split('?')[0].split('#')[0].replace(/\/$/, '') + '/kinksters';
+            log('On a place page, appending /kinksters: ' + base);
+            return base;
+        }
+
+        // Old format
         const patterns = [
             { regex: /(https:\/\/fetlife\.com\/(cities|administrative_areas|countries|places)\/\d+)/, suffix: '/kinksters' },
             { regex: /(https:\/\/fetlife\.com\/groups\/\d+)/, suffix: '/group_memberships' },
@@ -528,122 +442,21 @@
             { regex: /(https:\/\/fetlife\.com\/fetishes\/\d+)/, suffix: '/kinksters' },
             { regex: /(https:\/\/fetlife\.com\/users\/\d+)/, suffix: '/friends' },
         ];
-
         for (const p of patterns) {
             const m = loc.match(p.regex);
             if (m) {
                 const url = m[1] + p.suffix;
-                log('Detected: ' + url);
+                log('Detected old format: ' + url);
                 return url;
             }
         }
 
-        // Try to find location links on the current page
-        log('No direct URL match. Scanning page for location links...');
-        const locationLinks = findLocationLinksOnPage();
-        if (locationLinks.length > 0) {
-            log('Found location link on page: ' + locationLinks[0]);
-            return locationLinks[0] + '/kinksters';
-        }
-
         alert(
             'Could not detect a member list on this page.\n\n' +
-            'Try one of these:\n' +
-            '1. Go to a city/state/country page on FetLife and try again\n' +
-            '2. Click on someone\'s location link to get to their city page\n' +
-            '3. Use "Paste a FetLife URL" mode\n' +
-            '4. Use "Search by Keyword" mode\n' +
-            '5. Use "Discover from My Profile" mode'
+            'Navigate to a place page first (e.g. click a city/state link),\n' +
+            'or use "Paste FetLife URL(s)" mode.'
         );
         return null;
-    }
-
-    function findLocationLinksOnPage() {
-        const results = [];
-        const links = document.querySelectorAll('a[href*="/cities/"], a[href*="/administrative_areas/"], a[href*="/countries/"]');
-        for (const link of links) {
-            const href = link.getAttribute('href');
-            if (href && /\/(cities|administrative_areas|countries)\/\d+$/.test(href)) {
-                const full = href.startsWith('http') ? href : 'https://fetlife.com' + href;
-                if (!results.includes(full)) results.push(full);
-            }
-        }
-        return results;
-    }
-
-    function discoverLocationFromProfile(callback) {
-        updateStatus('Discovering your location from your profile...');
-        // Find the current user's profile link
-        const profileLink = document.querySelector('a[href*="/users/"].fl-nav__nickname, a.fl-nav__nickname, [data-user-id] a, a[href^="/users/"]');
-        if (!profileLink) {
-            // Try to find user ID from the page
-            const navNick = document.querySelector('.fl-nav__nickname');
-            if (navNick) {
-                const href = navNick.closest('a') ? navNick.closest('a').getAttribute('href') : null;
-                if (href) {
-                    fetchProfileLocation(href, callback);
-                    return;
-                }
-            }
-            alert('Could not find your profile link. Please navigate to your profile page and try again, or use a different search mode.');
-            return;
-        }
-        fetchProfileLocation(profileLink.getAttribute('href'), callback);
-    }
-
-    function fetchProfileLocation(profilePath, callback) {
-        const url = profilePath.startsWith('http') ? profilePath : 'https://fetlife.com' + profilePath;
-        log('Fetching profile: ' + url);
-
-        gmXHR({
-            method: 'GET',
-            url: url,
-            headers: { 'Accept': 'text/html' },
-            onload: function (resp) {
-                if (resp.status !== 200) {
-                    updateStatus('Could not load profile (HTTP ' + resp.status + ')');
-                    return;
-                }
-                const doc = new DOMParser().parseFromString(resp.responseText, 'text/html');
-                const locLinks = [];
-
-                // Look for location links in the profile
-                const allLinks = doc.querySelectorAll('a[href*="/cities/"], a[href*="/administrative_areas/"], a[href*="/countries/"]');
-                for (const link of allLinks) {
-                    const href = link.getAttribute('href');
-                    if (href && /\/(cities|administrative_areas|countries)\/\d+$/.test(href)) {
-                        const full = href.startsWith('http') ? href : 'https://fetlife.com' + href;
-                        const text = link.textContent.trim();
-                        locLinks.push({ url: full + '/kinksters', text: text, type: href.split('/')[1] || '' });
-                    }
-                }
-
-                if (locLinks.length === 0) {
-                    log('No location links found on profile. HTML snippet: ' + resp.responseText.substring(0, 2000));
-                    updateStatus('Could not find location links on your profile. Try another search mode.');
-                    return;
-                }
-
-                log('Found location links: ' + JSON.stringify(locLinks));
-
-                // Use the broadest location (administrative_area > city) for wider coverage
-                // Or let user pick — for now use the state/province level if available
-                const area = locLinks.find(l => l.type === 'administrative_areas');
-                const city = locLinks.find(l => l.type === 'cities');
-                const country = locLinks.find(l => l.type === 'countries');
-
-                const chosen = area || city || country;
-                if (chosen) {
-                    updateStatus('Found location: ' + chosen.text + ' — starting search...');
-                    callback([chosen.url]);
-                } else {
-                    callback([locLinks[0].url]);
-                }
-            },
-            onerror: function () {
-                updateStatus('Network error loading profile.');
-            }
-        });
     }
 
     // ---------------------
@@ -665,15 +478,49 @@
         updateStatus('Resolving URLs...');
 
         resolveURLs(function (urls) {
-            if (!urls || urls.length === 0) {
-                stopSearch();
-                return;
-            }
+            if (!urls || urls.length === 0) { stopSearch(); return; }
             searchState.urlQueue = urls;
             searchState.currentUrlIndex = 0;
             log('URLs to crawl: ' + JSON.stringify(urls));
-            crawlNextURL();
+
+            // For the FIRST page of the FIRST URL, if it matches the current page,
+            // scrape the live DOM directly (guaranteed to have content)
+            const currentBase = window.location.href.split('?')[0].split('#')[0];
+            if (urls[0].split('?')[0].split('#')[0] === currentBase) {
+                log('First URL matches current page — scraping live DOM for page 1');
+                scrapeLiveDOM();
+            } else {
+                crawlNextURL();
+            }
         });
+    }
+
+    function scrapeLiveDOM() {
+        const profiles = extractProfilesFromDocument(document);
+        log('Live DOM: extracted ' + profiles.length + ' profiles');
+
+        if (profiles.length === 0) {
+            log('No profiles found in live DOM. Will try fetching.');
+            crawlNextURL();
+            return;
+        }
+
+        const params = getSearchParams();
+        for (const profile of profiles) {
+            searchState.totalScanned++;
+            if (matchesSearch(profile, params)) {
+                searchState.totalMatches++;
+                searchState.allResults.push(profile);
+                displayResult(profile);
+            }
+        }
+
+        updateResultsCount();
+        updateStatus(`Page 1 (live): ${searchState.totalMatches} matches / ${searchState.totalScanned} scanned. Next page in ${getDelay() / 1000}s...`);
+
+        // Continue with page 2 via fetch
+        searchState.currentPage = 2;
+        setTimeout(() => crawlPage(searchState.urlQueue[0], 2), getDelay());
     }
 
     function crawlNextURL() {
@@ -683,7 +530,7 @@
             return;
         }
         const url = searchState.urlQueue[searchState.currentUrlIndex];
-        log('Starting crawl of URL ' + (searchState.currentUrlIndex + 1) + '/' + searchState.urlQueue.length + ': ' + url);
+        log('Crawling URL ' + (searchState.currentUrlIndex + 1) + '/' + searchState.urlQueue.length + ': ' + url);
         searchState.currentPage = 1;
         crawlPage(url, 1);
     }
@@ -696,7 +543,7 @@
         if (searchState.allResults.length > 0) {
             document.getElementById('fl-asl-btn-export').style.display = '';
         }
-        updateStatus(`Stopped. Scanned ${searchState.totalScanned} profiles, found ${searchState.totalMatches} matches.`);
+        updateStatus(`Stopped. ${searchState.totalMatches} matches / ${searchState.totalScanned} scanned.`);
         updateResultsCount();
     }
 
@@ -707,10 +554,8 @@
         if (searchState.allResults.length > 0) {
             document.getElementById('fl-asl-btn-export').style.display = '';
         }
-        updateStatus(`Done! Scanned ${searchState.totalScanned} profiles, found ${searchState.totalMatches} matches.`);
+        updateStatus(`Done! ${searchState.totalMatches} matches / ${searchState.totalScanned} scanned.`);
         updateResultsCount();
-
-        // Auto-switch to results tab
         document.querySelector('#fl-asl-tabs button[data-tab="results"]').click();
     }
 
@@ -720,10 +565,13 @@
         el.textContent = `${searchState.totalMatches} matches from ${searchState.totalScanned} profiles scanned`;
     }
 
+    // ---------------------
+    // Fetch pages using window.fetch (includes session cookies)
+    // ---------------------
     function crawlPage(baseURL, page) {
         if (searchState.aborted) return;
         if (page > getMaxPages()) {
-            log('Reached max pages (' + getMaxPages() + ') for this URL.');
+            log('Reached max pages (' + getMaxPages() + ').');
             searchState.currentUrlIndex++;
             setTimeout(crawlNextURL, getDelay());
             return;
@@ -731,368 +579,388 @@
 
         const sep = baseURL.includes('?') ? '&' : '?';
         const url = baseURL + sep + 'page=' + page;
-        updateStatus(`[URL ${searchState.currentUrlIndex + 1}/${searchState.urlQueue.length}] Page ${page}... (${searchState.totalMatches} matches / ${searchState.totalScanned} scanned)`);
+        updateStatus(`[${searchState.currentUrlIndex + 1}/${searchState.urlQueue.length}] Page ${page}... (${searchState.totalMatches} matches / ${searchState.totalScanned} scanned)`);
 
-        gmXHR({
+        // Use window.fetch — this includes session cookies so we get the full page
+        fetch(url, {
             method: 'GET',
-            url: url,
-            headers: { 'Accept': 'text/html' },
-            onload: function (response) {
-                if (searchState.aborted) return;
-
-                log('HTTP ' + response.status + ' for ' + url + ' (' + response.responseText.length + ' bytes)');
-
-                if (response.status === 403 || response.status === 429) {
-                    updateStatus('Rate limited (HTTP ' + response.status + '). Increase delay and try again later.');
-                    stopSearch();
-                    return;
-                }
-                if (response.status === 302 || response.status === 301) {
-                    log('Redirect detected. FetLife may have changed URL format.');
-                    updateStatus('Redirect (HTTP ' + response.status + '). The URL may be wrong.');
-                    stopSearch();
-                    return;
-                }
-                if (response.status !== 200) {
-                    updateStatus('Error: HTTP ' + response.status + '. Stopping.');
-                    stopSearch();
-                    return;
-                }
-
-                const doc = new DOMParser().parseFromString(response.responseText, 'text/html');
-
-                // Log what we see on the page for debugging
-                logPageStructure(doc);
-
-                const profiles = extractMemberCards(doc);
-                log('Extracted ' + profiles.length + ' profiles from page ' + page);
-
-                if (profiles.length === 0) {
-                    log('No profiles found on page ' + page + '. Moving to next URL.');
-                    searchState.currentUrlIndex++;
-                    setTimeout(crawlNextURL, getDelay());
-                    return;
-                }
-
-                const params = getSearchParams();
-                for (const profile of profiles) {
-                    searchState.totalScanned++;
-                    if (matchesSearch(profile, params)) {
-                        searchState.totalMatches++;
-                        searchState.allResults.push(profile);
-                        displayResult(profile);
-                    }
-                }
-
-                updateResultsCount();
-                updateStatus(`Page ${page} done. ${searchState.totalMatches} matches / ${searchState.totalScanned} scanned. Next in ${getDelay() / 1000}s...`);
-
-                // Next page
-                searchState.currentPage = page + 1;
-                setTimeout(() => crawlPage(baseURL, page + 1), getDelay());
+            credentials: 'same-origin',
+            headers: {
+                'Accept': 'text/html,application/xhtml+xml',
             },
-            onerror: function (err) {
-                log('Network error: ' + JSON.stringify(err));
-                updateStatus('Network error. Retrying in 10s...');
-                setTimeout(() => crawlPage(baseURL, page), 10000);
+        })
+        .then(response => {
+            if (searchState.aborted) return null;
+            log('HTTP ' + response.status + ' for ' + url);
+
+            if (response.status === 403 || response.status === 429) {
+                updateStatus('Rate limited (HTTP ' + response.status + '). Increase delay and try later.');
+                stopSearch();
+                return null;
             }
-        });
-    }
+            if (!response.ok) {
+                updateStatus('Error: HTTP ' + response.status);
+                stopSearch();
+                return null;
+            }
+            return response.text();
+        })
+        .then(html => {
+            if (!html || searchState.aborted) return;
 
-    // ---------------------
-    // Debug: log what we see on the page
-    // ---------------------
-    function logPageStructure(doc) {
-        // Log key elements we're looking for
-        const selectors = [
-            '.fl-member-card',
-            '.fl-member-card__info',
-            '.fl-member-card__location',
-            '.fl-member-card__user',
-            '.user_in_list',
-            '.member_card',
-            '[class*="member"]',
-            '[class*="kinkster"]',
-            '[class*="card"]',
-            'a[href*="/users/"]',
-        ];
-        for (const sel of selectors) {
-            const count = doc.querySelectorAll(sel).length;
-            if (count > 0) log(`  Found ${count} elements matching: ${sel}`);
-        }
+            log('Response: ' + html.length + ' bytes');
 
-        // Log first few class names on the page for discovery
-        const mainContent = doc.querySelector('#main-content, #maincontent, main, [role="main"]');
-        if (mainContent) {
-            // Get unique class names from first-level children
-            const classes = new Set();
-            mainContent.querySelectorAll('*').forEach(el => {
-                if (el.className && typeof el.className === 'string') {
-                    el.className.split(/\s+/).forEach(c => { if (c) classes.add(c); });
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const profiles = extractProfilesFromDocument(doc);
+            log('Extracted ' + profiles.length + ' profiles from page ' + page);
+
+            if (profiles.length === 0) {
+                // Check if we got a "no results" page or just an empty page
+                const bodyText = doc.body ? doc.body.textContent.trim() : '';
+                if (bodyText.includes("You shouldn't see this")) {
+                    log('WARNING: Got empty shell page. FetLife may be blocking fetch requests.');
+                    log('Trying alternative fetch method...');
+                    crawlPageViaIframe(baseURL, page);
+                    return;
                 }
-            });
-            const classArr = [...classes].slice(0, 50);
-            log('  Main content classes (first 50): ' + classArr.join(', '));
-        }
+                log('No profiles on page ' + page + '. Moving to next URL.');
+                searchState.currentUrlIndex++;
+                setTimeout(crawlNextURL, getDelay());
+                return;
+            }
 
-        // Log the first 500 chars of main content text
-        const bodyText = (doc.body ? doc.body.textContent : '').replace(/\s+/g, ' ').trim().substring(0, 500);
-        log('  Page text preview: ' + bodyText);
+            const params = getSearchParams();
+            for (const profile of profiles) {
+                searchState.totalScanned++;
+                if (matchesSearch(profile, params)) {
+                    searchState.totalMatches++;
+                    searchState.allResults.push(profile);
+                    displayResult(profile);
+                }
+            }
 
-        // Log all links to /users/ (first 10)
-        const userLinks = doc.querySelectorAll('a[href*="/users/"]');
-        const linkSample = [...userLinks].slice(0, 10).map(a => {
-            return a.getAttribute('href') + ' | text="' + a.textContent.trim().substring(0, 30) + '" | parent=' + (a.parentElement ? a.parentElement.className : 'none');
+            updateResultsCount();
+            updateStatus(`Page ${page}: ${searchState.totalMatches} matches / ${searchState.totalScanned} scanned. Next in ${getDelay() / 1000}s...`);
+            searchState.currentPage = page + 1;
+            setTimeout(() => crawlPage(baseURL, page + 1), getDelay());
+        })
+        .catch(err => {
+            log('Fetch error: ' + err.message);
+            updateStatus('Network error. Retrying in 10s...');
+            setTimeout(() => crawlPage(baseURL, page), 10000);
         });
-        if (linkSample.length > 0) log('  User links sample:\n    ' + linkSample.join('\n    '));
     }
 
     // ---------------------
-    // Profile extraction — tries multiple strategies
+    // Fallback: load page in a hidden iframe to get JS-rendered content
     // ---------------------
-    function extractMemberCards(doc) {
-        let profiles = [];
+    function crawlPageViaIframe(baseURL, page) {
+        if (searchState.aborted) return;
 
-        // Strategy 1: .fl-member-card (known FetLife selector)
-        let cards = doc.querySelectorAll('.fl-member-card');
-        if (cards.length > 0) {
-            log('Strategy 1: .fl-member-card found ' + cards.length + ' cards');
-            for (const card of cards) {
-                const p = parseMemberCard(card);
-                if (p) profiles.push(p);
+        const sep = baseURL.includes('?') ? '&' : '?';
+        const url = baseURL + sep + 'page=' + page;
+        log('Iframe fallback for: ' + url);
+
+        const iframe = document.createElement('iframe');
+        iframe.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1024px;height:768px;opacity:0;pointer-events:none;';
+        iframe.src = url;
+
+        let loaded = false;
+        const timeout = setTimeout(() => {
+            if (!loaded) {
+                log('Iframe timeout for page ' + page);
+                cleanup();
+                searchState.currentUrlIndex++;
+                setTimeout(crawlNextURL, getDelay());
             }
-            if (profiles.length > 0) return profiles;
+        }, 30000);
+
+        function cleanup() {
+            loaded = true;
+            clearTimeout(timeout);
+            if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
         }
 
-        // Strategy 2: .user_in_list (older FetLife)
-        cards = doc.querySelectorAll('.user_in_list');
-        if (cards.length > 0) {
-            log('Strategy 2: .user_in_list found ' + cards.length + ' cards');
-            for (const card of cards) {
-                const p = parseUserInList(card);
-                if (p) profiles.push(p);
-            }
-            if (profiles.length > 0) return profiles;
-        }
+        iframe.addEventListener('load', () => {
+            if (loaded || searchState.aborted) { cleanup(); return; }
 
-        // Strategy 3: Any element with "member" or "kinkster" in class containing user links
-        const memberLike = doc.querySelectorAll('[class*="member-card"], [class*="member_card"], [class*="kinkster"]');
-        if (memberLike.length > 0) {
-            log('Strategy 3: member/kinkster class elements found ' + memberLike.length);
-            for (const el of memberLike) {
-                const p = parseGenericMemberElement(el);
-                if (p) profiles.push(p);
-            }
-            if (profiles.length > 0) return profiles;
-        }
+            // Wait a bit for JS to render content
+            setTimeout(() => {
+                try {
+                    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                    const profiles = extractProfilesFromDocument(iframeDoc);
+                    log('Iframe: extracted ' + profiles.length + ' profiles from page ' + page);
 
-        // Strategy 4: Scan all user links and look at their surrounding containers
-        log('Strategy 4: Scanning all /users/ links...');
-        const userLinks = doc.querySelectorAll('a[href*="/users/"]');
+                    if (profiles.length === 0) {
+                        log('Iframe also found 0 profiles. Page may be empty or blocked.');
+                        cleanup();
+                        searchState.currentUrlIndex++;
+                        setTimeout(crawlNextURL, getDelay());
+                        return;
+                    }
+
+                    const params = getSearchParams();
+                    for (const profile of profiles) {
+                        searchState.totalScanned++;
+                        if (matchesSearch(profile, params)) {
+                            searchState.totalMatches++;
+                            searchState.allResults.push(profile);
+                            displayResult(profile);
+                        }
+                    }
+
+                    updateResultsCount();
+                    cleanup();
+                    updateStatus(`Page ${page} (iframe): ${searchState.totalMatches} matches / ${searchState.totalScanned}. Next in ${getDelay() / 1000}s...`);
+                    searchState.currentPage = page + 1;
+                    setTimeout(() => crawlPageViaIframe(baseURL, page + 1), getDelay());
+                } catch (e) {
+                    log('Iframe access error: ' + e.message);
+                    cleanup();
+                    // If cross-origin error, fall back to scraping current page only
+                    updateStatus('Cannot access iframe content. Only live page scraping is available.');
+                    stopSearch();
+                }
+            }, 3000); // Wait 3s for content to render
+        });
+
+        document.body.appendChild(iframe);
+    }
+
+    // ---------------------
+    // Profile extraction from any document
+    // ---------------------
+    function extractProfilesFromDocument(doc) {
+        const profiles = [];
         const seen = new Set();
 
-        for (const link of userLinks) {
+        // Find all user profile links, excluding nav/header
+        const allLinks = doc.querySelectorAll('a[href*="/users/"]');
+        log('  Total /users/ links found: ' + allLinks.length);
+
+        // First pass: identify the user links that are in the main content (not nav)
+        const userEntries = [];
+        for (const link of allLinks) {
             const href = link.getAttribute('href') || '';
             const idMatch = href.match(/\/users\/(\d+)/);
             if (!idMatch) continue;
 
+            // Skip nav/header links
+            if (link.closest('nav, header, [class*="fl-nav"], footer')) continue;
+
             const userId = idMatch[1];
             if (seen.has(userId)) continue;
-
-            // Skip nav/header links — look for links that are in the main content
-            const inNav = link.closest('nav, header, .fl-nav, [class*="nav"]');
-            if (inNav) continue;
-
-            // Walk up to find the best container
-            let container = link.parentElement;
-            for (let i = 0; i < 5 && container; i++) {
-                // Stop if we hit something too large
-                const userLinksInside = container.querySelectorAll('a[href*="/users/"]');
-                const uniqueUsers = new Set([...userLinksInside].map(a => (a.getAttribute('href') || '').match(/\/users\/(\d+)/)?.[1]).filter(Boolean));
-                if (uniqueUsers.size > 3) break; // Too many users in this container, go back
-                if (uniqueUsers.size >= 1) {
-                    // Check if this level has info we want (text with numbers = possible age)
-                    const text = container.textContent || '';
-                    if (/\d{2}/.test(text)) break; // Has age-like numbers, good container
-                }
-                container = container.parentElement;
-            }
-
-            if (!container) container = link.parentElement;
             seen.add(userId);
 
-            const profile = parseContainerForProfile(container, userId, link);
+            userEntries.push({ link, userId });
+        }
+
+        log('  Unique user links in main content: ' + userEntries.length);
+
+        for (const entry of userEntries) {
+            const profile = extractProfileFromLink(entry.link, entry.userId, doc);
             if (profile) {
                 profiles.push(profile);
                 if (profiles.length <= 3) {
-                    log('  Strategy 4 sample: ' + JSON.stringify(profile));
+                    log('  Sample: ' + JSON.stringify(profile));
                 }
             }
         }
 
-        log('Strategy 4 found ' + profiles.length + ' profiles');
         return profiles;
     }
 
-    function parseMemberCard(card) {
+    /**
+     * Given a link to /users/ID, look at its surrounding context to extract profile data.
+     *
+     * From the screenshot, FetLife's current kinkster list format is:
+     *   [Avatar]  NickName  25F Princess       [Follow]
+     *             Phoenix, Arizona
+     *             72 Pics · 10 Vids · 2 Writings
+     *
+     * The text next to the nickname contains: Age + Gender abbreviation + Role
+     * e.g. "25F Princess", "46M Kinkster", "32M Dom-leaning Switch", "36TW Bottom"
+     */
+    function extractProfileFromLink(link, userId, doc) {
         try {
-            const link = card.querySelector('a[href*="/users/"]');
-            if (!link) return null;
-            const idMatch = (link.getAttribute('href') || '').match(/\/users\/(\d+)/);
-            if (!idMatch) return null;
-
-            const img = card.querySelector('img');
-            const nickname = img ? (img.getAttribute('alt') || '') : (link.textContent || '').trim();
-
-            const infoEl = card.querySelector('.fl-member-card__info, [class*="info"], [class*="meta"]');
-            const infoText = infoEl ? infoEl.textContent.trim() : '';
-
-            const locationEl = card.querySelector('.fl-member-card__location, [class*="location"]');
-            const locationText = locationEl ? locationEl.textContent.trim() : '';
-
-            return buildProfile(idMatch[1], nickname, infoText, locationText, img ? img.src : '');
-        } catch (e) { log('parseMemberCard error: ' + e.message); return null; }
-    }
-
-    function parseUserInList(card) {
-        try {
-            const link = card.querySelector('a[href*="/users/"]');
-            if (!link) return null;
-            const idMatch = (link.getAttribute('href') || '').match(/\/users\/(\d+)/);
-            if (!idMatch) return null;
-
-            const img = card.querySelector('img');
-            const nickname = img ? (img.getAttribute('alt') || '') : '';
-            const quietEl = card.querySelector('.quiet');
-            const infoText = quietEl ? quietEl.textContent.trim() : '';
-            const smallEl = card.querySelector('.small');
-            const locationText = smallEl ? smallEl.textContent.trim() : '';
-
-            return buildProfile(idMatch[1], nickname, infoText, locationText, img ? img.src : '');
-        } catch (e) { return null; }
-    }
-
-    function parseGenericMemberElement(el) {
-        try {
-            const link = el.querySelector('a[href*="/users/"]');
-            if (!link) return null;
-            const idMatch = (link.getAttribute('href') || '').match(/\/users\/(\d+)/);
-            if (!idMatch) return null;
-            return parseContainerForProfile(el, idMatch[1], link);
-        } catch (e) { return null; }
-    }
-
-    function parseContainerForProfile(container, userId, link) {
-        try {
-            let nickname = '';
-
-            // Try to get nickname from the link text or img alt
-            if (link) {
-                const img = link.querySelector('img');
-                if (img && img.getAttribute('alt')) {
-                    nickname = img.getAttribute('alt');
-                } else {
-                    nickname = link.textContent.trim();
-                }
-            }
-
-            // If nickname is empty or too long (grabbed too much), try other links
-            if (!nickname || nickname.length > 50) {
-                const allLinks = container.querySelectorAll('a[href*="/users/' + userId + '"]');
-                for (const a of allLinks) {
-                    const text = a.textContent.trim();
-                    if (text && text.length > 0 && text.length < 50) {
-                        nickname = text;
+            // The nickname link text
+            let nickname = link.textContent.trim();
+            // If the link contains just an image (avatar), the text might be empty
+            if (!nickname || nickname.length > 60) {
+                // Try to find a text link to this user nearby
+                const allUserLinks = doc.querySelectorAll('a[href*="/users/' + userId + '"]');
+                for (const a of allUserLinks) {
+                    const t = a.textContent.trim();
+                    if (t && t.length > 0 && t.length < 60 && !a.querySelector('img')) {
+                        nickname = t;
                         break;
                     }
                 }
             }
             if (!nickname) nickname = 'User ' + userId;
 
-            // Get avatar
-            const img = container.querySelector('img');
-            const avatarUrl = img ? (img.getAttribute('src') || '') : '';
+            // Find avatar
+            let avatarUrl = '';
+            const allUserLinks = doc.querySelectorAll('a[href*="/users/' + userId + '"]');
+            for (const a of allUserLinks) {
+                const img = a.querySelector('img');
+                if (img && img.src) {
+                    avatarUrl = img.src;
+                    break;
+                }
+            }
 
-            // Get text content for parsing — but exclude nested user containers
-            const text = container.textContent || '';
+            // Walk up from the link to find the containing "card" / row
+            // We want the element that contains ONE user's info
+            let container = link.parentElement;
+            for (let i = 0; i < 8 && container; i++) {
+                const userLinksInside = container.querySelectorAll('a[href*="/users/"]');
+                const uniqueIds = new Set();
+                for (const a of userLinksInside) {
+                    const m = (a.getAttribute('href') || '').match(/\/users\/(\d+)/);
+                    if (m) uniqueIds.add(m[1]);
+                }
+                // If this container has exactly 1 user and is big enough, use it
+                if (uniqueIds.size === 1 && container.textContent.length > 10) {
+                    // Keep going up a bit more if the parent also has only this user
+                    const parent = container.parentElement;
+                    if (parent) {
+                        const parentIds = new Set();
+                        for (const a of parent.querySelectorAll('a[href*="/users/"]')) {
+                            const m = (a.getAttribute('href') || '').match(/\/users\/(\d+)/);
+                            if (m) parentIds.add(m[1]);
+                        }
+                        if (parentIds.size === 1) {
+                            container = parent;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                if (uniqueIds.size > 1) {
+                    // Gone too far, step back
+                    container = container.children.length > 0 ? link.parentElement : container;
+                    break;
+                }
+                container = container.parentElement;
+            }
 
-            // Try to separate info text from location text
-            // Look for location links
-            const locLinks = container.querySelectorAll('a[href*="/cities/"], a[href*="/administrative_areas/"], a[href*="/countries/"]');
-            let locationText = '';
+            if (!container) container = link.parentElement;
+
+            // Get all text content from the container
+            const fullText = container.textContent.trim();
+
+            // Extract location from location links in the container
+            let location = '';
+            const locLinks = container.querySelectorAll(
+                'a[href*="/p/"], a[href*="/cities/"], a[href*="/administrative_areas/"], a[href*="/countries/"]'
+            );
+            const locParts = [];
             for (const ll of locLinks) {
-                locationText += (locationText ? ', ' : '') + ll.textContent.trim();
+                const t = ll.textContent.trim();
+                if (t && !locParts.includes(t)) locParts.push(t);
+            }
+            location = locParts.join(', ');
+
+            // If no location links found, try to find location-like text
+            // (city, state pattern — capitalized words separated by comma)
+            if (!location) {
+                const locMatch = fullText.match(/([A-Z][a-z]+(?:\s[A-Z][a-z]+)*),\s*([A-Z][a-z]+(?:\s[A-Z][a-z]+)*)/);
+                if (locMatch) location = locMatch[0];
             }
 
-            return buildProfile(userId, nickname, text, locationText || text, avatarUrl);
-        } catch (e) { return null; }
+            // Parse the age/gender/role info
+            // Format from screenshot: "25F Princess", "46M Kinkster", "55M Dom-leaning Switch"
+            // This appears as text near the nickname
+            const aslInfo = parseASLFromText(fullText, nickname);
+
+            return {
+                userId: userId,
+                nickname: nickname,
+                age: aslInfo.age,
+                gender: aslInfo.gender,
+                role: aslInfo.role,
+                location: location,
+                avatarUrl: avatarUrl,
+                profileUrl: 'https://fetlife.com/users/' + userId,
+            };
+        } catch (e) {
+            log('Error extracting profile for user ' + userId + ': ' + e.message);
+            return null;
+        }
     }
 
-    // ---------------------
-    // Profile building & parsing
-    // ---------------------
-    function buildProfile(userId, nickname, infoText, locationText, avatarUrl) {
-        const parsed = parseInfoText(infoText);
-        return {
-            userId: userId,
-            nickname: (nickname || 'User ' + userId).substring(0, 60),
-            age: parsed.age,
-            gender: parsed.gender,
-            role: parsed.role,
-            location: locationText.substring(0, 200),
-            avatarUrl: avatarUrl || '',
-            profileUrl: 'https://fetlife.com/users/' + userId,
-        };
-    }
-
-    function parseInfoText(text) {
+    /**
+     * Parse age, gender, and role from text like "25F Princess" or "32M Dom-leaning Switch"
+     *
+     * FetLife abbreviations (from screenshot):
+     *   M = Male, F = Female, TM = Trans Man, TF = Trans Female,
+     *   TW = Trans Woman, GF = Gender Fluid, GQ = Genderqueer,
+     *   NB = Non-binary, CD/TV = Crossdresser, FEM = Femme, etc.
+     */
+    function parseASLFromText(text, nickname) {
         let age = null, gender = '', role = '';
-        if (!text) return { age, gender, role };
 
-        // Age: look for 2-digit number (18-99 range most likely)
-        const ageMatch = text.match(/\b([1-9]\d)\b/);
-        if (ageMatch) {
-            const n = parseInt(ageMatch[1]);
-            if (n >= 18 && n <= 99) age = n;
-        }
+        // Look for the pattern: number + gender abbreviation + role
+        // e.g. "25F Princess", "46M Kinkster", "55M Dom-leaning Switch", "36GTW Bottom"
+        // The pattern appears after or near the nickname in the text
 
-        // Gender: match longest terms first to avoid partial matches
-        const genderTerms = [
-            'Crossdresser/Transvestite', 'Trans - Male/Man', 'Trans - Female/Woman',
-            'Gender Fluid', 'Genderqueer', 'Non-binary', 'Two-spirit',
-            'Cis Man', 'Cis Woman', 'Trans Man', 'Trans Woman',
-            'Transgender', 'Crossdresser', 'Transvestite', 'Intersex',
-            'Agender', 'Butch', 'Femme', 'Male', 'Female',
-        ];
-        for (const term of genderTerms) {
-            if (text.toLowerCase().includes(term.toLowerCase())) {
-                gender = term;
-                break;
+        // Try specific FetLife format: digits immediately followed by gender code then space then role
+        // Pattern: \b(\d{2})([A-Z]{1,4})\s+(.+?)(?:\s*\d+\s*Pics|\s*Follow|$)
+        const aslPattern = /\b(\d{2})(M|F|TM|TF|TW|GF|GQ|NB|CD\/TV|FEM|BUT|IS|AG|TS|CD|TG|MTF|FTM|CF|CM)\s+(.+?)(?:\s*\d+\s*Pics|\s*\d+\s*Vids|\s*\d+\s*Writings|\s*Follow|\s*Phoenix|\s*[A-Z][a-z]+,\s*[A-Z]|$)/i;
+        const m = text.match(aslPattern);
+
+        if (m) {
+            age = parseInt(m[1]);
+            gender = expandGender(m[2].toUpperCase());
+            role = m[3].trim();
+            // Clean up role - remove trailing noise
+            role = role.replace(/\s*(Follow|Phoenix|[A-Z][a-z]+,\s*[A-Z][a-z]+|\d+\s*Pics).*$/i, '').trim();
+        } else {
+            // Fallback: look for any 2-digit number as age
+            const ageMatch = text.match(/\b([1-9]\d)\b/);
+            if (ageMatch) {
+                const n = parseInt(ageMatch[1]);
+                if (n >= 18 && n <= 99) age = n;
             }
-        }
 
-        // Role: match multi-word terms first
-        const roleTerms = [
-            'Brat Tamer', 'Primal Hunter', 'Primal Prey', 'Rope Bunny',
-            'Not Applicable',
-            'Dominant', 'Domme', 'Switch', 'Submissive',
-            'Master', 'Mistress', 'Slave', 'Sadist', 'Masochist',
-            'Sadomasochist', 'Kinkster', 'Fetishist', 'Hedonist',
-            'Exhibitionist', 'Voyeur', 'Rigger', 'Daddy', 'Mommy',
-            'Brat', 'Owner', 'Pet', 'Primal', 'Degrader', 'Degradee',
-            'Boss', 'Princess', 'Doll', 'Puppy', 'Kitten', 'Pony',
-            'Captain', 'Swinger', 'Vanilla', 'Unsure',
-            'Top', 'Bottom', 'Dom', 'Sub', 'Boy', 'Girl',
-        ];
-        for (const term of roleTerms) {
-            const regex = new RegExp('\\b' + term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
-            if (regex.test(text)) {
-                role = term;
-                break;
+            // Look for gender keywords
+            const genderTerms = [
+                'Crossdresser/Transvestite', 'Gender Fluid', 'Genderqueer',
+                'Non-binary', 'Cis Man', 'Cis Woman', 'Trans Man', 'Trans Woman',
+                'Transgender', 'Intersex', 'Two-spirit', 'Agender', 'Butch', 'Femme',
+                'Male', 'Female',
+            ];
+            for (const term of genderTerms) {
+                if (text.toLowerCase().includes(term.toLowerCase())) {
+                    gender = term;
+                    break;
+                }
+            }
+
+            // Look for role keywords
+            for (const term of ROLES) {
+                const regex = new RegExp('\\b' + term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
+                if (regex.test(text)) {
+                    role = term;
+                    break;
+                }
             }
         }
 
         return { age, gender, role };
+    }
+
+    function expandGender(code) {
+        const map = {
+            'M': 'Male', 'F': 'Female', 'TM': 'Trans Man', 'TF': 'Trans Female',
+            'TW': 'Trans Woman', 'GF': 'Gender Fluid', 'GQ': 'Genderqueer',
+            'NB': 'Non-binary', 'CD/TV': 'Crossdresser/Transvestite',
+            'CD': 'Crossdresser', 'TG': 'Transgender', 'FEM': 'Femme',
+            'BUT': 'Butch', 'IS': 'Intersex', 'AG': 'Agender', 'TS': 'Two-spirit',
+            'MTF': 'Trans Woman', 'FTM': 'Trans Man', 'CF': 'Cis Woman', 'CM': 'Cis Man',
+        };
+        return map[code] || code;
     }
 
     // ---------------------
@@ -1105,19 +973,27 @@
             if (params.ageMax && profile.age > params.ageMax) return false;
         }
 
-        // Gender (skip filter if all are checked or none are checked)
+        // Gender (skip if all checked)
         if (params.genders.length > 0 && params.genders.length < GENDERS.length && profile.gender) {
             const g = profile.gender.toLowerCase();
-            if (!params.genders.some(sg => g.includes(sg) || sg.includes(g))) return false;
+            const match = params.genders.some(sg => {
+                const s = sg.toLowerCase();
+                return g === s || g.includes(s) || s.includes(g);
+            });
+            if (!match) return false;
         }
 
-        // Role (skip filter if all are checked or none are checked)
+        // Role (skip if all checked)
         if (params.roles.length > 0 && params.roles.length < ROLES.length && profile.role) {
             const r = profile.role.toLowerCase();
-            if (!params.roles.some(sr => r.includes(sr) || sr.includes(r))) return false;
+            const match = params.roles.some(sr => {
+                const s = sr.toLowerCase();
+                return r === s || r.includes(s) || s.includes(r);
+            });
+            if (!match) return false;
         }
 
-        // Location text
+        // Location
         if (params.locationFilter) {
             const loc = (profile.location || '').toLowerCase();
             if (!loc.includes(params.locationFilter)) return false;
@@ -1131,32 +1007,26 @@
     // ---------------------
     function displayResult(profile) {
         const container = document.getElementById('fl-asl-results');
-
         const div = document.createElement('div');
         div.className = 'fl-asl-result';
 
         const avatarHTML = profile.avatarUrl
-            ? `<img src="${escapeHtml(profile.avatarUrl)}" alt="" loading="lazy">`
+            ? `<img src="${esc(profile.avatarUrl)}" alt="" loading="lazy">`
             : `<div style="width:44px;height:44px;border-radius:50%;background:#333;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#666;font-size:18px;">?</div>`;
 
-        const meta = [
-            profile.age || '',
-            profile.gender || '',
-            profile.role || '',
-        ].filter(Boolean).join(' / ');
+        const meta = [profile.age || '', profile.gender || '', profile.role || ''].filter(Boolean).join(' / ');
 
         div.innerHTML = `
             ${avatarHTML}
             <div class="info">
-                <a href="${escapeHtml(profile.profileUrl)}" target="_blank">${escapeHtml(profile.nickname)}</a>
-                ${meta ? `<div class="meta">${escapeHtml(meta)}</div>` : ''}
-                ${profile.location ? `<div class="meta">${escapeHtml(profile.location)}</div>` : ''}
+                <a href="${esc(profile.profileUrl)}" target="_blank">${esc(profile.nickname)}</a>
+                ${meta ? `<div class="meta">${esc(meta)}</div>` : ''}
+                ${profile.location ? `<div class="meta">${esc(profile.location)}</div>` : ''}
             </div>
             <div class="actions">
-                <a href="https://fetlife.com/conversations/new?with=${escapeHtml(profile.userId)}" target="_blank">Msg</a>
+                <a href="https://fetlife.com/conversations/new?with=${esc(profile.userId)}" target="_blank">Msg</a>
             </div>
         `;
-
         container.appendChild(div);
     }
 
@@ -1164,59 +1034,42 @@
     // CSV Export
     // ---------------------
     function exportCSV() {
-        if (searchState.allResults.length === 0) {
-            alert('No results to export.');
-            return;
-        }
+        if (searchState.allResults.length === 0) { alert('No results to export.'); return; }
 
         const headers = ['Nickname', 'Age', 'Gender', 'Role', 'Location', 'Profile URL', 'Message URL'];
         const rows = searchState.allResults.map(p => [
-            p.nickname,
-            p.age || '',
-            p.gender || '',
-            p.role || '',
-            p.location || '',
-            p.profileUrl,
-            'https://fetlife.com/conversations/new?with=' + p.userId,
+            p.nickname, p.age || '', p.gender || '', p.role || '', p.location || '',
+            p.profileUrl, 'https://fetlife.com/conversations/new?with=' + p.userId,
         ]);
 
-        const csvContent = [headers, ...rows]
+        const csv = [headers, ...rows]
             .map(row => row.map(cell => '"' + String(cell).replace(/"/g, '""') + '"').join(','))
             .join('\n');
 
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'fetlife-search-results-' + new Date().toISOString().slice(0, 10) + '.csv';
+        a.download = 'fetlife-results-' + new Date().toISOString().slice(0, 10) + '.csv';
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-
         log('Exported ' + searchState.allResults.length + ' results to CSV');
     }
 
-    // ---------------------
-    // Utility
-    // ---------------------
-    function escapeHtml(str) {
+    function esc(str) {
         if (!str) return '';
-        return String(str)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#039;');
+        return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
     }
 
     // ---------------------
-    // Initialize
+    // Init
     // ---------------------
     if (window.location.hostname === 'fetlife.com') {
         buildUI();
-        log('ASL Search v2 loaded on ' + window.location.href);
-        log('Tampermonkey/GM API available: ' + (gmXHR ? 'YES' : 'NO'));
+        log('ASL Search v3 loaded on ' + window.location.href);
     }
 
 })();
