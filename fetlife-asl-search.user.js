@@ -659,8 +659,10 @@
         document.getElementById('asl-clear').style.display = '';
         document.getElementById('asl-rtab-count').textContent = '(' + results.length + ')';
 
+        // Show newest results first
+        const reversed = [...results].reverse();
         let currentBatch = null;
-        for (const p of results) {
+        for (const p of reversed) {
             // Insert batch divider when batch changes
             if (p.batch && p.batch !== currentBatch) {
                 currentBatch = p.batch;
