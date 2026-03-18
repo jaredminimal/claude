@@ -608,18 +608,20 @@
     // MATCHING
     // =====================
     function matches(p, params) {
-        // Age
-        if (p.age !== null) {
-            if (p.age < params.ageMin || p.age > params.ageMax) return false;
-        }
+        // Age — exclude if no age detected
+        if (p.age === null) return false;
+        if (p.age < params.ageMin || p.age > params.ageMax) return false;
 
-        // Gender — match by code
-        if (params.genders.length > 0 && params.genders.length < GENDERS.length && p.genderCode) {
+        // Gender — if filter is active (not all selected), REQUIRE a match
+        if (params.genders.length > 0 && params.genders.length < GENDERS.length) {
+            // If we couldn't detect gender, exclude the profile
+            if (!p.genderCode) return false;
             if (!params.genders.includes(p.genderCode)) return false;
         }
 
-        // Role
-        if (params.roles.length > 0 && params.roles.length < ROLES.length && p.role) {
+        // Role — if filter is active (not all selected), REQUIRE a match
+        if (params.roles.length > 0 && params.roles.length < ROLES.length) {
+            if (!p.role) return false;
             const r = p.role.toLowerCase();
             const match = params.roles.some(sr => {
                 const s = sr.toLowerCase();
@@ -645,7 +647,7 @@
             ? `<img src="${esc(p.avatar)}" alt="" loading="lazy">`
             : `<div style="width:44px;height:44px;border-radius:50%;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:18px;flex-shrink:0">?</div>`;
         const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
-        d.innerHTML = `${av}<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}</div><div class="act"><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Msg</a></div>`;
+        d.innerHTML = `${av}<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}</div><div class="act"><a href="${esc(p.url)}" target="_blank">Profile</a><br><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Message</a></div>`;
         c.appendChild(d);
     }
 
