@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        6.2.1
+// @version        6.3.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -20,10 +20,9 @@
     //   - Scrape → save → navigate → repeat
     //
     // Phase 2: Activity check (new)
-    //   - For each Phase 1 match, fetch() the main profile page HTML
-    //   - The /activity sub-page is client-rendered (empty shell via fetch),
-    //     but the main profile page includes "Latest Activity" server-rendered
-    //   - Parse <time datetime="..."> elements for the most recent date
+    //   - For each Phase 1 match, fetch /{nickname}/activity with Accept: application/json
+    //   - FetLife returns JSON with story_groups[].stories[].created_at timestamps
+    //   - The most recent created_at across all stories = last activity date
     //   - Filter out profiles whose last activity is older than threshold
     //   - Uses random delays (3-8s) between fetches to look natural
     //   - Sequential requests only — never parallel
@@ -545,45 +544,42 @@
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    function parseActivityDate(html) {
-        // The profile page contains a "Latest Activity" section with
-        // <time datetime="2026-03-15T18:29:32Z" data-smart-timestamp="..."> elements.
-        // We look for <time> elements with data-smart-timestamp (activity timestamps)
-        // to avoid matching unrelated <time> tags. The first match is the most recent.
-        const match = html.match(/<time\s[^>]*?datetime="([^"]+)"[^>]*?data-smart-timestamp/);
-        if (match) {
-            const parsed = new Date(match[1]);
-            if (!isNaN(parsed.getTime())) return parsed;
-        }
-        // Fallback: try any <time datetime="..."> element
-        const fallback = html.match(/<time\s+datetime="([^"]+)"/);
-        if (!fallback) return null;
-        const parsed = new Date(fallback[1]);
-        if (isNaN(parsed.getTime())) return null;
-        return parsed;
-    }
-
     async function fetchActivityDate(profileUrl) {
         try {
-            // Fetch the profile page directly — NOT the /activity sub-page.
-            // FetLife is a Vue SPA and the /activity page is client-rendered,
-            // so fetch() returns an empty shell. However, the main profile page
-            // includes the "Latest Activity" section server-rendered with <time> elements.
-            const resp = await fetch(profileUrl, {
+            // Use FetLife's JSON API: /{nickname}/activity returns activity feed JSON
+            // with story_groups[].stories[].created_at timestamps.
+            // This works reliably unlike HTML scraping (FetLife is a Vue SPA that
+            // returns empty shells for HTML fetches).
+            const activityUrl = profileUrl.replace(/\/?$/, '/activity');
+            const resp = await fetch(activityUrl, {
                 credentials: 'same-origin',
                 headers: {
-                    'Accept': 'text/html,application/xhtml+xml',
+                    'Accept': 'application/json',
                 }
             });
             if (!resp.ok) {
-                console.log('[ASL] Profile fetch failed:', resp.status, profileUrl);
+                console.log('[ASL] Activity fetch failed:', resp.status, profileUrl);
                 return { date: null, error: resp.status };
             }
-            const html = await resp.text();
-            const date = parseActivityDate(html);
-            return { date, error: null };
+            const data = await resp.json();
+
+            // Find the most recent created_at from any story in any story_group
+            let latest = null;
+            if (data.story_groups) {
+                for (const group of data.story_groups) {
+                    for (const story of (group.stories || [])) {
+                        if (story.created_at) {
+                            const d = new Date(story.created_at);
+                            if (!isNaN(d.getTime()) && (!latest || d > latest)) {
+                                latest = d;
+                            }
+                        }
+                    }
+                }
+            }
+            return { date: latest, error: null };
         } catch (e) {
-            console.error('[ASL] Profile fetch error:', e, profileUrl);
+            console.error('[ASL] Activity fetch error:', e, profileUrl);
             return { date: null, error: e.message };
         }
     }
