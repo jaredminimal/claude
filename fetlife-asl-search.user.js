@@ -314,8 +314,7 @@
 
         console.log('[ASL] Starting search batch', batch, '— pages', startPage, 'to', endPage);
 
-        // Navigate to the start page
-        const currentPage = getCurrentPageNumber();
+        // Navigate to the start page (or scrape if already on it)
         if (currentPage === startPage) {
             scrapCurrentPageAndContinue();
         } else {
