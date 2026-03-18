@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search (Modern Edition)
-// @version        5.2.0
+// @version        5.3.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, and role. Crawls member lists with CSV export.
 // @match          https://fetlife.com/*
@@ -28,6 +28,7 @@
 
     const STORAGE_KEY = 'asl_search_state';
     const RESULTS_KEY = 'asl_search_results';
+    const PROGRESS_KEY = 'asl_search_progress'; // tracks lastPageCrawled and batchCount across searches
 
     // Gender codes used by FetLife (from live DOM inspection)
     const GENDERS = ['M','F','W','TM','TF','TW','GF','GQ','NB','CD/TV','FEM','BUT','IS','AG','TS','CF','CM'];
@@ -98,6 +99,7 @@
         #asl input[type=range]{width:100%;accent-color:#c22;margin-bottom:8px}
         .asl-crawl-banner{position:fixed;top:0;left:0;right:0;z-index:100001;background:#c22;color:#fff;padding:10px 20px;font:14px -apple-system,sans-serif;display:flex;justify-content:space-between;align-items:center}
         .asl-crawl-banner button{background:#fff;color:#c22;border:none;padding:6px 16px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px}
+        .asl-batch-divider{padding:6px 12px;margin:10px 0 6px;font-size:11px;font-weight:600;color:#c22;text-transform:uppercase;letter-spacing:.5px;border-top:1px solid #333;border-bottom:1px solid #333;background:#16213e;text-align:center}
     `;
     document.head.appendChild(style);
 
@@ -142,7 +144,7 @@
                     <div class="sec">Step 3: Speed &amp; Limits</div>
                     <label class="fl">Delay between pages: <span id="asl-dl">5</span>s</label>
                     <input type="range" id="asl-spd" min="3" max="20" value="5" step="1">
-                    <label class="fl">Max pages to crawl</label>
+                    <label class="fl">Pages to search</label>
                     <input type="number" id="asl-mp" min="1" max="2000" value="100">
                     <button class="asl-b" id="asl-go">Start Search</button>
                     <div id="asl-status"></div>
@@ -234,8 +236,18 @@
         localStorage.setItem(RESULTS_KEY, JSON.stringify(results));
     }
 
+    function getProgress() {
+        try { return JSON.parse(localStorage.getItem(PROGRESS_KEY)) || { lastPageCrawled: 0, batchCount: 0 }; }
+        catch(e) { return { lastPageCrawled: 0, batchCount: 0 }; }
+    }
+
+    function saveProgress(prog) {
+        localStorage.setItem(PROGRESS_KEY, JSON.stringify(prog));
+    }
+
     function clearResults() {
         localStorage.removeItem(RESULTS_KEY);
+        localStorage.removeItem(PROGRESS_KEY);
         document.getElementById('asl-res').innerHTML = '';
         document.getElementById('asl-rcount').textContent = '';
         document.getElementById('asl-csv').style.display = 'none';
@@ -266,6 +278,7 @@
         }
 
         // Gather filter params
+        const pagesToSearch = parseInt(document.getElementById('asl-mp').value) || 100;
         const params = {
             ageMin: parseInt(document.getElementById('asl-amin').value) || 18,
             ageMax: parseInt(document.getElementById('asl-amax').value) || 99,
@@ -273,31 +286,39 @@
             roles: [...document.querySelectorAll('#asl-r input:checked')].map(c => c.value),
             locFilter: document.getElementById('asl-loc').value.trim().toLowerCase(),
             delay: (parseInt(document.getElementById('asl-spd').value) || 5) * 1000,
-            maxPages: parseInt(document.getElementById('asl-mp').value) || 100,
         };
 
-        // Clear previous results
-        localStorage.removeItem(RESULTS_KEY);
+        // Continue from where we left off
+        const prog = getProgress();
+        const startPage = prog.lastPageCrawled + 1;
+        const batch = prog.batchCount + 1;
+        const endPage = startPage + pagesToSearch - 1;
 
         // Save search state
         const searchState = {
             baseURL: baseURL,
             params: params,
-            currentPage: 1,
+            currentPage: startPage,
+            startPage: startPage,
+            endPage: endPage,
+            batch: batch,
             scanned: 0,
             active: true,
         };
         saveState(searchState);
 
-        console.log('[ASL] Starting search:', searchState);
+        // Update progress with new batch count (lastPageCrawled updated as pages are crawled)
+        prog.batchCount = batch;
+        saveProgress(prog);
 
-        // If we're already on page 1, scrape it now
+        console.log('[ASL] Starting search batch', batch, '— pages', startPage, 'to', endPage);
+
+        // Navigate to the start page
         const currentPage = getCurrentPageNumber();
-        if (currentPage === 1 || window.location.href.split('?')[0] === baseURL) {
+        if (currentPage === startPage) {
             scrapCurrentPageAndContinue();
         } else {
-            // Navigate to page 1
-            window.location.href = baseURL + '?page=1';
+            window.location.href = baseURL + '?page=' + startPage;
         }
     }
 
@@ -342,6 +363,9 @@
                 // No more profiles — search is done
                 s.active = false;
                 saveState(s);
+                const prog = getProgress();
+                prog.lastPageCrawled = pageNum;
+                saveProgress(prog);
                 removeCrawlBanner();
                 setStatus('Done! ' + getSavedResults().length + ' matches from ' + s.scanned + ' profiles scanned.');
                 loadAndDisplayResults();
@@ -355,26 +379,31 @@
             for (const p of profiles) {
                 s.scanned++;
                 if (matchesFilter(p, params)) {
+                    p.batch = s.batch;
+                    p.batchPages = s.startPage + '-' + s.endPage;
                     results.push(p);
                     newMatches++;
                 }
             }
             saveResults(results);
 
-            // Update state
+            // Update state and progress
             s.currentPage = pageNum + 1;
             saveState(s);
+            const prog = getProgress();
+            prog.lastPageCrawled = pageNum;
+            saveProgress(prog);
 
             // Update banner
             updateCrawlBanner(s, results.length, pageNum);
             console.log('[ASL] Page', pageNum, ':', newMatches, 'new matches.', results.length, 'total matches.', s.scanned, 'scanned.');
 
-            // Check if we've hit max pages
-            if (pageNum >= s.params.maxPages) {
+            // Check if we've hit the end page for this batch
+            if (pageNum >= s.endPage) {
                 s.active = false;
                 saveState(s);
                 removeCrawlBanner();
-                setStatus('Max pages reached. ' + results.length + ' matches from ' + s.scanned + ' scanned.');
+                setStatus('Search batch ' + s.batch + ' done. ' + results.length + ' total matches from ' + s.scanned + ' scanned this run.');
                 loadAndDisplayResults();
                 return;
             }
@@ -425,7 +454,7 @@
         banner.className = 'asl-crawl-banner';
         banner.id = 'asl-crawl-banner';
         banner.innerHTML = `
-            <span id="asl-banner-text">ASL Search running — Page ${getCurrentPageNumber()} — ${getSavedResults().length} matches so far...</span>
+            <span id="asl-banner-text">ASL Search ${s.batch || ''} — Page ${getCurrentPageNumber()} of ${s.startPage || '?'}-${s.endPage || '?'} — ${getSavedResults().length} matches so far...</span>
             <button id="asl-banner-stop">Stop Search</button>
         `;
         document.body.prepend(banner);
@@ -435,7 +464,7 @@
     function updateCrawlBanner(s, totalMatches, pageNum) {
         const el = document.getElementById('asl-banner-text');
         if (el) {
-            el.textContent = `ASL Search — Page ${pageNum} done — ${totalMatches} matches / ${s.scanned} scanned — Next page in ${s.params.delay/1000}s...`;
+            el.textContent = `ASL Search ${s.batch || ''} — Page ${pageNum} of ${s.startPage || '?'}-${s.endPage || '?'} — ${totalMatches} matches / ${s.scanned} scanned — Next page in ${s.params.delay/1000}s...`;
         }
     }
 
@@ -449,6 +478,10 @@
         if (s) {
             s.active = false;
             saveState(s);
+            // Update progress so next search continues from where we stopped
+            const prog = getProgress();
+            prog.lastPageCrawled = getCurrentPageNumber();
+            saveProgress(prog);
         }
         removeCrawlBanner();
         console.log('[ASL] Search stopped by user.');
@@ -624,7 +657,17 @@
         document.getElementById('asl-clear').style.display = '';
         document.getElementById('asl-rtab-count').textContent = '(' + results.length + ')';
 
+        let currentBatch = null;
         for (const p of results) {
+            // Insert batch divider when batch changes
+            if (p.batch && p.batch !== currentBatch) {
+                currentBatch = p.batch;
+                const divider = document.createElement('div');
+                divider.className = 'asl-batch-divider';
+                divider.textContent = '— Search ' + p.batch + ' (pages ' + (p.batchPages || '?') + ') —';
+                container.appendChild(divider);
+            }
+
             const d = document.createElement('div');
             d.className = 'asl-r';
             const av = p.avatar
