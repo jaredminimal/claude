@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        6.1.0
+// @version        6.1.1
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -183,7 +183,7 @@
                 </div>
                 <div class="asl-tab" id="asl-t-results">
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
-                        <label class="fl" style="margin:0;white-space:nowrap">Check first</label>
+                        <label class="fl" style="margin:0;white-space:nowrap">Check last</label>
                         <input type="number" id="asl-check-limit" min="1" max="9999" value="100" style="width:70px;margin:0">
                         <label class="fl" style="margin:0;white-space:nowrap">unchecked</label>
                     </div>
@@ -631,7 +631,8 @@
             return;
         }
         const checkLimit = parseInt(document.getElementById('asl-check-limit').value) || 100;
-        const unchecked = allUnchecked.slice(0, checkLimit);
+        // Take the LAST N unchecked (bottom of list = most recently added results)
+        const unchecked = allUnchecked.slice(-checkLimit);
 
         activityCheckAbort = false;
 
