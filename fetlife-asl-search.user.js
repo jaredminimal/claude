@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search (Modern Edition)
-// @version        5.4.0
+// @version        5.5.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, and role. Crawls member lists with CSV export.
 // @match          https://fetlife.com/*
@@ -31,12 +31,23 @@
     const PROGRESS_KEY = 'asl_search_progress'; // tracks lastPageCrawled and batchCount across searches
 
     // Gender codes used by FetLife (from live DOM inspection)
-    const GENDERS = ['M','F','W','TM','TF','TW','GF','GQ','NB','CD/TV','FEM','BUT','IS','AG','TS','CF','CM'];
+    const GENDERS = [
+        'F','W','FEM','M','AG','Andro','B','BG','CD/TV','Cis','Db','Dg','DemiG','DW',
+        'FtM','GF','GN','GNC','GQ','IS','Masc','MtF','NB','PG','QG','TG','TM','TW',
+        'TwoS','UoG','TS','TV'
+    ];
+    const DEFAULT_GENDERS = new Set(['F','W','FEM']);
     const GENDER_LABELS = {
-        'M':'Male','F':'Female','W':'Woman','TM':'Trans Man','TF':'Trans Female','TW':'Trans Woman',
-        'GF':'Gender Fluid','GQ':'Genderqueer','NB':'Non-binary','CD/TV':'Crossdresser',
-        'FEM':'Femme','BUT':'Butch','IS':'Intersex','AG':'Agender','TS':'Two-spirit',
-        'CF':'Cis Female','CM':'Cis Male'
+        'F':'Female','W':'Woman','FEM':'Femme','M':'Male',
+        'AG':'Agender','Andro':'Androgyne','B':'Butch','BG':'Bigender',
+        'CD/TV':'Crossdresser/TransVestite','Cis':'Cisgender',
+        'Db':'Demiboy','Dg':'Demigirl','DemiG':'Demigender','DW':'Demiwoman',
+        'FtM':'Transgender - FtM','GF':'Gender Fluid','GN':'Gender Neutral',
+        'GNC':'Gender Non-Conforming','GQ':'Gender Queer','IS':'Intersex',
+        'Masc':'Masculine','MtF':'Transgender - MtF','NB':'Non-Binary',
+        'PG':'Pangender','QG':'Questioning','TG':'Transgender',
+        'TM':'Trans Man','TW':'Trans Woman','TwoS':'Two-Spirit',
+        'UoG':'Unsure of Gender','TS':'TransSexual','TV':'TransVestite'
     };
     const ROLES = [
         'Dominant','Domme','Dom','Switch','Submissive','Sub','Master','Mistress','Slave',
@@ -135,7 +146,7 @@
                     </div>
                     <label class="fl">Gender</label>
                     <div class="sh" id="asl-gh"></div>
-                    <div class="cg" id="asl-g">${GENDERS.map(g=>`<label><input type="checkbox" value="${g}" checked> ${GENDER_LABELS[g]||g}</label>`).join('')}</div>
+                    <div class="cg" id="asl-g">${GENDERS.map(g=>`<label><input type="checkbox" value="${g}"${DEFAULT_GENDERS.has(g)?' checked':''}> ${GENDER_LABELS[g]||g}</label>`).join('')}</div>
                     <label class="fl">Role</label>
                     <div class="sh" id="asl-rh"></div>
                     <div class="cg" id="asl-r">${ROLES.map(r=>`<label><input type="checkbox" value="${r}" checked> ${r}</label>`).join('')}</div>
@@ -558,8 +569,8 @@
         //
         // Pattern: {age}{genderCode} {role} {location}{stats}Follow
 
-        // Gender codes — W added (seen in live data), longest first
-        const genderCodes = ['CD/TV','FEM','BUT','TM','TF','TW','GF','GQ','NB','CF','CM','IS','AG','TS','TG','W','M','F'];
+        // Gender codes — longest first to avoid partial matches
+        const genderCodes = ['CD/TV','DemiG','Andro','TwoS','Masc','FEM','FtM','MtF','GNC','Cis','DW','Db','Dg','BG','GF','GN','GQ','NB','PG','QG','TG','TM','TW','UoG','IS','AG','TS','TV','W','M','F','B'];
         const gcPattern = genderCodes.map(g => g.replace('/', '\\/')).join('|');
 
         // Text now starts with age+gender since nickname is stripped
