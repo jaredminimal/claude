@@ -338,7 +338,8 @@
     }
 
     // =====================
-    // FETCH PAGES (using window.fetch with session cookies)
+    // LOAD PAGES VIA HIDDEN IFRAME (so Vue.js renders the content)
+    // fetch() returns an empty SPA shell — we need JS to execute.
     // =====================
     function fetchPage(baseURL, page) {
         if (state.aborted || page > getMaxPages()) {
@@ -348,44 +349,102 @@
 
         const sep = baseURL.includes('?') ? '&' : '?';
         const url = baseURL + sep + 'page=' + page;
-        status('[Page ' + page + '] Fetching... (' + state.matched + ' matches / ' + state.scanned + ' scanned)');
+        status('[Page ' + page + '] Loading... (' + state.matched + ' matches / ' + state.scanned + ' scanned)');
+        log('Loading iframe: ' + url);
 
-        fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'text/html' } })
-            .then(r => {
-                if (state.aborted) return null;
-                log('HTTP ' + r.status + ' — ' + url);
-                if (r.status === 403 || r.status === 429) {
-                    status('Rate limited (' + r.status + '). Increase delay and try later.');
+        const iframe = document.createElement('iframe');
+        iframe.style.cssText = 'position:fixed;top:-10000px;left:-10000px;width:1280px;height:900px;opacity:0;pointer-events:none;';
+        iframe.src = url;
+
+        let done = false;
+
+        // Timeout: if page doesn't load in 30s, skip it
+        const timeout = setTimeout(() => {
+            if (done) return;
+            done = true;
+            log('Iframe timeout for page ' + page);
+            cleanup();
+            // Try next page in case this was a fluke
+            state.page = page + 1;
+            setTimeout(() => fetchPage(baseURL, page + 1), getDelay());
+        }, 30000);
+
+        function cleanup() {
+            clearTimeout(timeout);
+            if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+        }
+
+        iframe.addEventListener('load', () => {
+            if (done || state.aborted) { cleanup(); return; }
+
+            // Wait for Vue to render the member cards
+            // Poll every 500ms for up to 10s
+            let attempts = 0;
+            const maxAttempts = 20;
+
+            function checkForContent() {
+                if (done || state.aborted) { cleanup(); return; }
+                attempts++;
+
+                try {
+                    const iDoc = iframe.contentDocument || iframe.contentWindow.document;
+                    const cards = iDoc.querySelectorAll('[data-member-card]');
+                    log('  Iframe poll #' + attempts + ': ' + cards.length + ' cards');
+
+                    if (cards.length > 0) {
+                        // Found content — scrape it
+                        done = true;
+                        const profiles = scrapeDocument(iDoc);
+                        log('Page ' + page + ' (iframe): ' + profiles.length + ' profiles');
+                        cleanup();
+
+                        if (profiles.length === 0) {
+                            finishSearch();
+                            return;
+                        }
+
+                        processProfiles(profiles);
+                        state.page = page + 1;
+                        status('Page ' + page + ' done. ' + state.matched + ' matches / ' + state.scanned + '. Next in ' + (getDelay()/1000) + 's...');
+                        setTimeout(() => fetchPage(baseURL, page + 1), getDelay());
+                        return;
+                    }
+
+                    if (attempts >= maxAttempts) {
+                        // Gave up waiting for Vue to render
+                        done = true;
+                        log('Page ' + page + ': no cards after ' + maxAttempts + ' polls. May be last page.');
+                        cleanup();
+                        finishSearch();
+                        return;
+                    }
+
+                    // Keep polling
+                    setTimeout(checkForContent, 500);
+                } catch (e) {
+                    // Cross-origin or security error
+                    done = true;
+                    log('Iframe access error: ' + e.message);
+                    cleanup();
+                    status('Cannot read iframe (blocked by site). Stopping.');
                     stopSearch();
-                    return null;
                 }
-                if (!r.ok) { status('HTTP error ' + r.status); stopSearch(); return null; }
-                return r.text();
-            })
-            .then(html => {
-                if (!html || state.aborted) return;
-                log('Got ' + html.length + ' bytes');
+            }
 
-                const doc = new DOMParser().parseFromString(html, 'text/html');
-                const profiles = scrapeDocument(doc);
-                log('Page ' + page + ': ' + profiles.length + ' profiles');
+            // Start polling after a short initial delay
+            setTimeout(checkForContent, 1000);
+        });
 
-                if (profiles.length === 0) {
-                    log('No profiles on page ' + page + ' — done.');
-                    finishSearch();
-                    return;
-                }
+        iframe.addEventListener('error', () => {
+            if (done) return;
+            done = true;
+            log('Iframe load error for page ' + page);
+            cleanup();
+            status('Failed to load page ' + page + '. Retrying in 10s...');
+            setTimeout(() => fetchPage(baseURL, page), 10000);
+        });
 
-                processProfiles(profiles);
-                state.page = page + 1;
-                status('Page ' + page + ' done. ' + state.matched + ' matches / ' + state.scanned + '. Next in ' + (getDelay()/1000) + 's...');
-                setTimeout(() => fetchPage(baseURL, page + 1), getDelay());
-            })
-            .catch(err => {
-                log('Fetch error: ' + err.message);
-                status('Network error. Retrying in 10s...');
-                setTimeout(() => fetchPage(baseURL, page), 10000);
-            });
+        document.body.appendChild(iframe);
     }
 
     // =====================
