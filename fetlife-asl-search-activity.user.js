@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        6.0.0
+// @version        6.0.1
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -246,7 +246,7 @@
     // =====================
     function setStatus(msg) {
         const el = document.getElementById('asl-status');
-        if (el) { el.style.display = ''; el.textContent = msg; }
+        if (el) { el.style.display = 'block'; el.textContent = msg; }
         console.log('[ASL]', msg);
     }
 
@@ -618,8 +618,8 @@
         const checkBtn = document.getElementById('asl-check-activity');
         const stopBtn = document.getElementById('asl-stop-activity');
         checkBtn.style.display = 'none';
-        stopBtn.style.display = '';
-        progressEl.style.display = '';
+        stopBtn.style.display = 'block';
+        progressEl.style.display = 'block';
 
         const total = unchecked.length;
         let checked = 0;
@@ -851,14 +851,14 @@
         if (uncheckedCount > 0 && activityDays > 0) statusText += ' — ' + uncheckedCount + ' not yet checked';
         countEl.textContent = statusText;
 
-        document.getElementById('asl-csv').style.display = '';
-        document.getElementById('asl-clear').style.display = '';
+        document.getElementById('asl-csv').style.display = 'block';
+        document.getElementById('asl-clear').style.display = 'block';
         document.getElementById('asl-rtab-count').textContent = '(' + displayResults.length + ')';
 
         // Show "Check Activity" button if there are unchecked results and filter is active
         const checkBtn = document.getElementById('asl-check-activity');
         if (uncheckedCount > 0 && activityDays > 0) {
-            checkBtn.style.display = '';
+            checkBtn.style.display = 'block';
             checkBtn.textContent = 'Check Activity (' + uncheckedCount + ' unchecked)';
         } else {
             checkBtn.style.display = 'none';
