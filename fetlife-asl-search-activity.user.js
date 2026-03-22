@@ -52,14 +52,22 @@
         'UoG':'Unsure of Gender','TS':'TransSexual','TV':'TransVestite'
     };
     const ROLES = [
-        'Dominant','Domme','Dom','Switch','Submissive','Sub','Master','Mistress','Slave',
-        'Top','Bottom','Sadist','Masochist','Sadomasochist','Kinkster','Fetishist',
-        'Hedonist','Exhibitionist','Voyeur','Rigger','Rope Bunny','Daddy','Mommy',
-        'Boy','Girl','Brat','Brat Tamer','Owner','Pet','Primal','Primal Hunter',
-        'Primal Prey','Degrader','Degradee','Boss','Princess','Doll','Puppy','Kitten',
-        'Pony','Captain','Swinger','Vanilla','Unsure','Not Applicable','Stag','Vixen',
-        'Dom-leaning Switch','Sub-leaning Switch','babygirl','babyboy','Bull',
-        'Exploring','Queen',
+        'Dominant','Domme','Dominatrix','Dom','Master','Mistress','Switch',
+        'Dom-leaning Switch','Sub-leaning Switch','Submissive','Sub','Slave',
+        'Top','Bottom','Power Bottom','Service Top',
+        'Sadist','Masochist','Sadomasochist',
+        'Kinkster','Fetishist','Hedonist','Exhibitionist','Voyeur',
+        'Rigger','Rope Bunny',
+        'Daddy','Mommy','Boy','Girl','Little','Middle','babygirl','babyboy',
+        'Brat','Brat Tamer','Primal','Primal Hunter','Primal Prey',
+        'Princess','Prince','Queen','King','Lady','Lord','Goddess','God',
+        'Owner','Pet','Puppy','Kitten','Pony','Handler','Trainer',
+        'Degrader','Degradee','Protector','Mentor',
+        'Boss','Captain','Sir','Ma\'am',
+        'Doll','Toy','Servant','Slave Trainer',
+        'Bull','Cuckold','Cuckoldress','Cuck','Stag','Vixen','Hotwife',
+        'Ageplayer','Swinger','Vanilla',
+        'Unsure','Uncertain','Not Applicable','Exploring','Evolving',
     ];
 
     // Phase 2 state
