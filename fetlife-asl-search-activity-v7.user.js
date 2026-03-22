@@ -184,6 +184,15 @@
                 </div>
                 <div class="asl-tab" id="asl-t-results">
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Sort by</label>
+                        <select id="asl-sort" style="width:auto;margin:0">
+                            <option value="newest">Newest first</option>
+                            <option value="age-asc">Age (youngest)</option>
+                            <option value="age-desc">Age (oldest)</option>
+                            <option value="activity">Last active</option>
+                        </select>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Check last</label>
                         <input type="number" id="asl-check-limit" min="1" max="9999" value="1000" style="width:70px;margin:0">
                         <label class="fl" style="margin:0;white-space:nowrap">unchecked</label>
@@ -224,6 +233,7 @@
         document.getElementById('asl-clear').addEventListener('click', clearResults);
         document.getElementById('asl-check-activity').addEventListener('click', startActivityCheck);
         document.getElementById('asl-stop-activity').addEventListener('click', () => { activityCheckAbort = true; });
+        document.getElementById('asl-sort').addEventListener('change', loadAndDisplayResults);
 
         // Load any existing results
         loadAndDisplayResults();
@@ -866,11 +876,26 @@
             checkBtn.style.display = 'none';
         }
 
-        // Show newest results first
-        const reversed = [...displayResults].reverse();
+        // Sort results
+        const sortMode = (document.getElementById('asl-sort') || {}).value || 'newest';
+        let sorted = [...displayResults];
+        if (sortMode === 'newest') {
+            sorted.reverse();
+        } else if (sortMode === 'age-asc') {
+            sorted.sort((a, b) => (a.age || 999) - (b.age || 999));
+        } else if (sortMode === 'age-desc') {
+            sorted.sort((a, b) => (b.age || 0) - (a.age || 0));
+        } else if (sortMode === 'activity') {
+            sorted.sort((a, b) => {
+                const da = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
+                const db = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
+                return db - da;
+            });
+        }
+
         let currentBatch = null;
-        for (const p of reversed) {
-            if (p.batch && p.batch !== currentBatch) {
+        for (const p of sorted) {
+            if (sortMode === 'newest' && p.batch && p.batch !== currentBatch) {
                 currentBatch = p.batch;
                 const divider = document.createElement('div');
                 divider.className = 'asl-batch-divider';
