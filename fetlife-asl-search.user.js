@@ -141,8 +141,8 @@
                     </p>
                     <div class="sec">Step 2: Set Filters</div>
                     <div class="row">
-                        <div><label class="fl">Min Age</label><input type="number" id="asl-amin" min="18" max="99" value="18"></div>
-                        <div><label class="fl">Max Age</label><input type="number" id="asl-amax" min="18" max="99" value="99"></div>
+                        <div><label class="fl">Min Age</label><input type="number" id="asl-amin" min="18" max="200" value="18"></div>
+                        <div><label class="fl">Max Age</label><input type="number" id="asl-amax" min="18" max="200" value="200"></div>
                     </div>
                     <label class="fl">Gender</label>
                     <div class="sh" id="asl-gh"></div>
@@ -292,7 +292,7 @@
         const pagesToSearch = parseInt(document.getElementById('asl-mp').value) || 100;
         const params = {
             ageMin: parseInt(document.getElementById('asl-amin').value) || 18,
-            ageMax: parseInt(document.getElementById('asl-amax').value) || 99,
+            ageMax: parseInt(document.getElementById('asl-amax').value) || 200,
             genders: [...document.querySelectorAll('#asl-g input:checked')].map(c => c.value),
             roles: [...document.querySelectorAll('#asl-r input:checked')].map(c => c.value),
             locFilter: document.getElementById('asl-loc').value.trim().toLowerCase(),
@@ -595,7 +595,7 @@
             const ageOnly = text.match(/^(\d{2,3})\s+(.+?)(?=\s*[A-Z][a-z]+,\s*[A-Z]|\s*\d+\s*Pics|\s*Follow)/);
             if (ageOnly) {
                 const n = parseInt(ageOnly[1]);
-                if (n >= 18 && n <= 99) {
+                if (n >= 18 && n <= 200) {
                     age = n;
                     role = ageOnly[2].replace(/[^\x20-\x7E]/g, '').trim();
                 }
@@ -604,7 +604,7 @@
                 const justAge = text.match(/^(\d{2,3})/);
                 if (justAge) {
                     const n = parseInt(justAge[1]);
-                    if (n >= 18 && n <= 99) age = n;
+                    if (n >= 18 && n <= 200) age = n;
                 }
             }
         }
