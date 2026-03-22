@@ -52,14 +52,22 @@
         'UoG':'Unsure of Gender','TS':'TransSexual','TV':'TransVestite'
     };
     const ROLES = [
-        'Dominant','Domme','Dom','Switch','Submissive','Sub','Master','Mistress','Slave',
-        'Top','Bottom','Sadist','Masochist','Sadomasochist','Kinkster','Fetishist',
-        'Hedonist','Exhibitionist','Voyeur','Rigger','Rope Bunny','Daddy','Mommy',
-        'Boy','Girl','Brat','Brat Tamer','Owner','Pet','Primal','Primal Hunter',
-        'Primal Prey','Degrader','Degradee','Boss','Princess','Doll','Puppy','Kitten',
-        'Pony','Captain','Swinger','Vanilla','Unsure','Not Applicable','Stag','Vixen',
-        'Dom-leaning Switch','Sub-leaning Switch','babygirl','babyboy','Bull',
-        'Exploring','Queen',
+        'Dominant','Domme','Dominatrix','Dom','Master','Mistress','Switch',
+        'Dom-leaning Switch','Sub-leaning Switch','Submissive','Sub','Slave',
+        'Top','Bottom','Power Bottom','Service Top',
+        'Sadist','Masochist','Sadomasochist',
+        'Kinkster','Fetishist','Hedonist','Exhibitionist','Voyeur',
+        'Rigger','Rope Bunny',
+        'Daddy','Mommy','Boy','Girl','Little','Middle','babygirl','babyboy',
+        'Brat','Brat Tamer','Primal','Primal Hunter','Primal Prey',
+        'Princess','Prince','Queen','King','Lady','Lord','Goddess','God',
+        'Owner','Pet','Puppy','Kitten','Pony','Handler','Trainer',
+        'Degrader','Degradee','Protector','Mentor',
+        'Boss','Captain','Sir','Ma\'am',
+        'Doll','Toy','Servant','Slave Trainer',
+        'Bull','Cuckold','Cuckoldress','Cuck','Stag','Vixen','Hotwife',
+        'Ageplayer','Swinger','Vanilla',
+        'Unsure','Uncertain','Not Applicable','Exploring','Evolving',
     ];
 
     // Phase 2 state
@@ -153,15 +161,15 @@
                     </p>
                     <div class="sec">Step 2: Set Filters</div>
                     <div class="row">
-                        <div><label class="fl">Min Age</label><input type="number" id="asl-amin" min="18" max="99" value="18"></div>
-                        <div><label class="fl">Max Age</label><input type="number" id="asl-amax" min="18" max="99" value="99"></div>
+                        <div><label class="fl">Min Age</label><input type="number" id="asl-amin" min="18" max="200" value="18"></div>
+                        <div><label class="fl">Max Age</label><input type="number" id="asl-amax" min="18" max="200" value="200"></div>
                     </div>
                     <label class="fl">Gender</label>
                     <div class="sh" id="asl-gh"></div>
                     <div class="cg" id="asl-g">${GENDERS.map(g=>`<label><input type="checkbox" value="${g}"${DEFAULT_GENDERS.has(g)?' checked':''}> ${GENDER_LABELS[g]||g}</label>`).join('')}</div>
-                    <label class="fl">Role</label>
+                    <label class="fl"><input type="checkbox" id="asl-role-toggle"> Filter by Role</label>
                     <div class="sh" id="asl-rh"></div>
-                    <div class="cg" id="asl-r">${ROLES.map(r=>`<label><input type="checkbox" value="${r}" checked> ${r}</label>`).join('')}</div>
+                    <div class="cg" id="asl-r" style="display:none">${ROLES.map(r=>`<label><input type="checkbox" value="${r}" checked> ${r}</label>`).join('')}</div>
                     <label class="fl">Location contains (optional)</label>
                     <input type="text" id="asl-loc" placeholder="e.g. Phoenix, Scottsdale">
                     <div class="sec">Step 3: Activity Filter</div>
@@ -218,6 +226,10 @@
 
         helpers('asl-g', 'asl-gh');
         helpers('asl-r', 'asl-rh');
+        document.getElementById('asl-role-toggle').addEventListener('change', function() {
+            document.getElementById('asl-r').style.display = this.checked ? '' : 'none';
+            document.getElementById('asl-rh').style.display = this.checked ? '' : 'none';
+        });
 
         document.getElementById('asl-go').addEventListener('click', startNewSearch);
         document.getElementById('asl-csv').addEventListener('click', exportCSV);
@@ -323,8 +335,9 @@
         const pagesToSearch = parseInt(document.getElementById('asl-mp').value) || 100;
         const params = {
             ageMin: parseInt(document.getElementById('asl-amin').value) || 18,
-            ageMax: parseInt(document.getElementById('asl-amax').value) || 99,
+            ageMax: parseInt(document.getElementById('asl-amax').value) || 200,
             genders: [...document.querySelectorAll('#asl-g input:checked')].map(c => c.value),
+            roleFilterEnabled: document.getElementById('asl-role-toggle').checked,
             roles: [...document.querySelectorAll('#asl-r input:checked')].map(c => c.value),
             locFilter: document.getElementById('asl-loc').value.trim().toLowerCase(),
             delay: (parseInt(document.getElementById('asl-spd').value) || 5) * 1000,
@@ -701,7 +714,7 @@
 
             const rawText = card.textContent.replace(/\s+/g, ' ').trim();
             const img = card.querySelector('img');
-            const avatar = img ? img.src : '';
+            const avatar = img ? (img.currentSrc || img.src || '') : '';
 
             let infoText = rawText;
             if (rawText.toLowerCase().startsWith(nickname.toLowerCase())) {
@@ -761,7 +774,7 @@
             const ageOnly = text.match(/^(\d{2,3})\s+(.+?)(?=\s*[A-Z][a-z]+,\s*[A-Z]|\s*\d+\s*Pics|\s*Follow)/);
             if (ageOnly) {
                 const n = parseInt(ageOnly[1]);
-                if (n >= 18 && n <= 99) {
+                if (n >= 18 && n <= 200) {
                     age = n;
                     role = ageOnly[2].replace(/[^\x20-\x7E]/g, '').trim();
                 }
@@ -769,7 +782,7 @@
                 const justAge = text.match(/^(\d{2,3})/);
                 if (justAge) {
                     const n = parseInt(justAge[1]);
-                    if (n >= 18 && n <= 99) age = n;
+                    if (n >= 18 && n <= 200) age = n;
                 }
             }
         }
@@ -795,7 +808,7 @@
             if (!params.genders.includes(p.genderCode)) return false;
         }
 
-        if (params.roles.length > 0 && params.roles.length < ROLES.length) {
+        if (params.roleFilterEnabled && params.roles.length > 0 && params.roles.length < ROLES.length) {
             if (!p.role) return false;
             const r = p.role.toLowerCase();
             const match = params.roles.some(sr => {
@@ -881,7 +894,7 @@
             const d = document.createElement('div');
             d.className = 'asl-r';
             const avImg = p.avatar
-                ? `<img src="${esc(p.avatar)}" alt="" loading="lazy">`
+                ? `<img src="${esc(p.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.onerror=null;this.parentNode.innerHTML='<div style=\\'width:80px;height:80px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0\\'>?</div>'">`
                 : `<div style="width:80px;height:80px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
             const av = `<a class="av" href="${esc(p.url)}" target="_blank">${avImg}</a>`;
             const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
