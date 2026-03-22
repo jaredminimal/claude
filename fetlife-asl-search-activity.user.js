@@ -167,8 +167,9 @@
                     <label class="fl">Gender</label>
                     <div class="sh" id="asl-gh"></div>
                     <div class="cg" id="asl-g">${GENDERS.map(g=>`<label><input type="checkbox" value="${g}"${DEFAULT_GENDERS.has(g)?' checked':''}> ${GENDER_LABELS[g]||g}</label>`).join('')}</div>
-                    <label class="fl">Role contains (optional)</label>
-                    <input type="text" id="asl-role" placeholder="e.g. Dominant, Switch, Submissive">
+                    <label class="fl"><input type="checkbox" id="asl-role-toggle"> Filter by Role</label>
+                    <div class="sh" id="asl-rh"></div>
+                    <div class="cg" id="asl-r" style="display:none">${ROLES.map(r=>`<label><input type="checkbox" value="${r}" checked> ${r}</label>`).join('')}</div>
                     <label class="fl">Location contains (optional)</label>
                     <input type="text" id="asl-loc" placeholder="e.g. Phoenix, Scottsdale">
                     <div class="sec">Step 3: Activity Filter</div>
@@ -224,6 +225,11 @@
         });
 
         helpers('asl-g', 'asl-gh');
+        helpers('asl-r', 'asl-rh');
+        document.getElementById('asl-role-toggle').addEventListener('change', function() {
+            document.getElementById('asl-r').style.display = this.checked ? '' : 'none';
+            document.getElementById('asl-rh').style.display = this.checked ? '' : 'none';
+        });
 
         document.getElementById('asl-go').addEventListener('click', startNewSearch);
         document.getElementById('asl-csv').addEventListener('click', exportCSV);
@@ -331,7 +337,8 @@
             ageMin: parseInt(document.getElementById('asl-amin').value) || 18,
             ageMax: parseInt(document.getElementById('asl-amax').value) || 200,
             genders: [...document.querySelectorAll('#asl-g input:checked')].map(c => c.value),
-            roleFilter: document.getElementById('asl-role').value.trim().toLowerCase(),
+            roleFilterEnabled: document.getElementById('asl-role-toggle').checked,
+            roles: [...document.querySelectorAll('#asl-r input:checked')].map(c => c.value),
             locFilter: document.getElementById('asl-loc').value.trim().toLowerCase(),
             delay: (parseInt(document.getElementById('asl-spd').value) || 5) * 1000,
             activityDays: parseInt(document.getElementById('asl-activity').value) || 0,
@@ -801,9 +808,14 @@
             if (!params.genders.includes(p.genderCode)) return false;
         }
 
-        if (params.roleFilter) {
+        if (params.roleFilterEnabled && params.roles.length > 0 && params.roles.length < ROLES.length) {
             if (!p.role) return false;
-            if (!p.role.toLowerCase().includes(params.roleFilter)) return false;
+            const r = p.role.toLowerCase();
+            const match = params.roles.some(sr => {
+                const s = sr.toLowerCase();
+                return r === s || r.includes(s) || s.includes(r);
+            });
+            if (!match) return false;
         }
 
         if (params.locFilter && !(p.location || '').toLowerCase().includes(params.locFilter)) return false;
