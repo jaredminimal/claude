@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        7.0.0
+// @version        7.1.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
