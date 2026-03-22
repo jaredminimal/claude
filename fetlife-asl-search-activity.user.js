@@ -714,7 +714,7 @@
 
             const rawText = card.textContent.replace(/\s+/g, ' ').trim();
             const img = card.querySelector('img');
-            const avatar = img ? (img.currentSrc || img.src || '') : '';
+            const avatar = img ? img.src : '';
 
             let infoText = rawText;
             if (rawText.toLowerCase().startsWith(nickname.toLowerCase())) {
@@ -894,7 +894,7 @@
             const d = document.createElement('div');
             d.className = 'asl-r';
             const avImg = p.avatar
-                ? `<img src="${esc(p.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.onerror=null;this.parentNode.innerHTML='<div style=\\'width:80px;height:80px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0\\'>?</div>'">`
+                ? `<img src="${esc(p.avatar)}" alt="" loading="lazy">`
                 : `<div style="width:80px;height:80px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
             const av = `<a class="av" href="${esc(p.url)}" target="_blank">${avImg}</a>`;
             const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
