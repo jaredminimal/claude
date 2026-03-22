@@ -714,17 +714,7 @@
 
             const rawText = card.textContent.replace(/\s+/g, ' ').trim();
             const img = card.querySelector('img');
-            let avatar = '';
-            if (img) {
-                const srcset = img.getAttribute('srcset');
-                if (srcset) {
-                    const parts = srcset.split(',').map(s => s.trim());
-                    const last = parts[parts.length - 1].split(/\s+/)[0];
-                    avatar = last;
-                }
-                if (!avatar) avatar = img.currentSrc || img.getAttribute('data-src') || img.src || '';
-                if (avatar.startsWith('data:') || avatar.length < 20) avatar = '';
-            }
+            const avatar = img ? (img.currentSrc || img.src || '') : '';
 
             let infoText = rawText;
             if (rawText.toLowerCase().startsWith(nickname.toLowerCase())) {

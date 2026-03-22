@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        7.1.0
+// @version        7.1.1
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -724,20 +724,7 @@
 
             const rawText = card.textContent.replace(/\s+/g, ' ').trim();
             const img = card.querySelector('img');
-            let avatar = '';
-            if (img) {
-                // Try multiple sources — FetLife lazy-loads images
-                const srcset = img.getAttribute('srcset');
-                if (srcset) {
-                    // Pick the largest image from srcset
-                    const parts = srcset.split(',').map(s => s.trim());
-                    const last = parts[parts.length - 1].split(/\s+/)[0];
-                    avatar = last;
-                }
-                if (!avatar) avatar = img.currentSrc || img.getAttribute('data-src') || img.src || '';
-                // Skip tiny placeholders (data URIs or very short URLs)
-                if (avatar.startsWith('data:') || avatar.length < 20) avatar = '';
-            }
+            const avatar = img ? (img.currentSrc || img.src || '') : '';
 
             let infoText = rawText;
             if (rawText.toLowerCase().startsWith(nickname.toLowerCase())) {
