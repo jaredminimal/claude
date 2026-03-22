@@ -99,7 +99,7 @@
         #asl-res{margin-top:4px}
         .asl-r{display:flex;gap:8px;padding:8px;background:#16213e;border-radius:8px;margin-bottom:6px;align-items:center;border:1px solid #222}
         .asl-r:hover{border-color:#c22}
-        .asl-r img{width:80px;height:80px;border-radius:8px;object-fit:cover;flex-shrink:0}.asl-r a.av{flex-shrink:0}
+        .asl-r img{width:110px;height:110px;border-radius:8px;object-fit:cover;flex-shrink:0}.asl-r a.av{flex-shrink:0}
         .asl-r .i{flex:1;min-width:0}
         .asl-r .i a{color:#fff;text-decoration:none;font-weight:600;font-size:13px}
         .asl-r .i a:hover{text-decoration:underline}
@@ -907,7 +907,7 @@
             d.className = 'asl-r';
             const avImg = p.avatar
                 ? `<img src="${esc(p.avatar)}" alt="" loading="lazy">`
-                : `<div style="width:80px;height:80px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
+                : `<div style="width:110px;height:110px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
             const av = `<a class="av" href="${esc(p.url)}" target="_blank">${avImg}</a>`;
             const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
 
