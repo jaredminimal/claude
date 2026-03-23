@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        7.2.1
+// @version        7.3.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -31,6 +31,7 @@
     const STORAGE_KEY = 'asl_search_state';
     const RESULTS_KEY = 'asl_search_results';
     const PROGRESS_KEY = 'asl_search_progress';
+    const IMAGE_CACHE_KEY = 'asl_image_cache';
 
     // Gender codes used by FetLife
     const GENDERS = [
@@ -72,7 +73,6 @@
 
     // Phase 2 state
     let activityCheckAbort = false;
-    let refreshAbort = false;
 
     // =====================
     // STYLES
@@ -103,7 +103,6 @@
         #asl-stop{background:#d93;color:#fff;margin-top:6px;display:none}
         #asl-clear{background:#555;color:#fff;margin-top:6px;display:none}
         #asl-csv{background:#2a6;color:#fff;margin-top:6px;display:none}#asl-csv:hover{background:#3b7}
-        #asl-refresh{background:#47a;color:#fff;margin-top:6px;display:none}#asl-refresh:hover{background:#58b}
         #asl-status{margin-top:8px;padding:8px 10px;background:#16213e;border-radius:6px;font-size:13px;color:#ccc;display:none;word-break:break-word}
         #asl-rcount{margin:8px 0 4px;font-size:12px;color:#888}
         #asl-res{margin-top:4px}
@@ -211,7 +210,6 @@
                     <button class="asl-b" id="asl-stop-activity">Stop Activity Check</button>
                     <div id="asl-activity-progress"></div>
                     <button class="asl-b" id="asl-csv">Export to CSV</button>
-                    <button class="asl-b" id="asl-refresh">Refresh Images</button>
                     <button class="asl-b" id="asl-clear">Clear All Results</button>
                     <div id="asl-rcount"></div>
                     <div id="asl-res"></div>
@@ -245,10 +243,9 @@
 
         document.getElementById('asl-go').addEventListener('click', startNewSearch);
         document.getElementById('asl-csv').addEventListener('click', exportCSV);
-        document.getElementById('asl-refresh').addEventListener('click', refreshAvatars);
         document.getElementById('asl-clear').addEventListener('click', clearResults);
         document.getElementById('asl-check-activity').addEventListener('click', startActivityCheck);
-        document.getElementById('asl-stop-activity').addEventListener('click', () => { activityCheckAbort = true; refreshAbort = true; });
+        document.getElementById('asl-stop-activity').addEventListener('click', () => { activityCheckAbort = true; });
         document.getElementById('asl-sort').addEventListener('change', loadAndDisplayResults);
 
         // Load any existing results
@@ -314,9 +311,50 @@
         localStorage.setItem(PROGRESS_KEY, JSON.stringify(prog));
     }
 
+    // =====================
+    // IMAGE CACHE (base64 data URLs in localStorage)
+    // =====================
+    function getImageCache() {
+        try { return JSON.parse(localStorage.getItem(IMAGE_CACHE_KEY)) || {}; } catch(e) { return {}; }
+    }
+
+    function saveImageCache(cache) {
+        try {
+            localStorage.setItem(IMAGE_CACHE_KEY, JSON.stringify(cache));
+        } catch(e) {
+            // localStorage full — evict oldest entries
+            const keys = Object.keys(cache);
+            if (keys.length > 50) {
+                const toRemove = keys.slice(0, Math.floor(keys.length / 4));
+                toRemove.forEach(k => delete cache[k]);
+                try { localStorage.setItem(IMAGE_CACHE_KEY, JSON.stringify(cache)); } catch(e2) { /* give up */ }
+            }
+        }
+    }
+
+    function cacheImageFromElement(imgEl, nickname) {
+        try {
+            const canvas = document.createElement('canvas');
+            canvas.width = imgEl.naturalWidth || 110;
+            canvas.height = imgEl.naturalHeight || 110;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(imgEl, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+            // Only cache if we got real data (not a broken/empty image)
+            if (dataUrl && dataUrl.length > 100) {
+                const cache = getImageCache();
+                cache[nickname] = dataUrl;
+                saveImageCache(cache);
+            }
+        } catch(e) {
+            // CORS or tainted canvas — can't cache this image
+        }
+    }
+
     function clearResults() {
         localStorage.removeItem(RESULTS_KEY);
         localStorage.removeItem(PROGRESS_KEY);
+        localStorage.removeItem(IMAGE_CACHE_KEY);
         document.getElementById('asl-res').innerHTML = '';
         document.getElementById('asl-rcount').textContent = '';
         document.getElementById('asl-csv').style.display = 'none';
@@ -671,13 +709,7 @@
                 <div class="bar"><div class="fill" style="width:${Math.round(checked/total*100)}%"></div></div>
             `;
 
-            const [result, avatarResult] = await Promise.all([
-                fetchActivityDate(p.url),
-                fetchAvatar(p.url)
-            ]);
-
-            // Update avatar if we got a fresh one
-            if (avatarResult.avatar) p.avatar = avatarResult.avatar;
+            const result = await fetchActivityDate(p.url);
 
             p.activityChecked = true;
             if (result.error) {
@@ -719,93 +751,6 @@
         const msg = activityCheckAbort
             ? `Activity check paused — ${checked}/${total} checked. ${active} active, ${inactive} inactive.${remaining > 0 ? ' ' + remaining + ' still unchecked.' : ''}`
             : `Activity check complete! ${active} active, ${inactive} inactive out of ${total} checked.${remaining > 0 ? ' ' + remaining + ' still unchecked.' : ''}`;
-        progressEl.innerHTML = `<strong>${msg}</strong>`;
-        setStatus(msg);
-        loadAndDisplayResults();
-    }
-
-    // =====================
-    // REFRESH AVATARS
-    // =====================
-    async function fetchAvatar(profileUrl) {
-        try {
-            const resp = await fetch(profileUrl, {
-                credentials: 'same-origin',
-                headers: { 'Accept': 'text/html' }
-            });
-            if (!resp.ok) return { avatar: null, error: resp.status };
-            const html = await resp.text();
-            // Look for avatar image in profile page HTML
-            // FetLife profile pages have og:image meta tag with the avatar URL
-            const ogMatch = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/);
-            if (ogMatch && ogMatch[1]) return { avatar: ogMatch[1], error: null };
-            // Fallback: look for avatar img tags
-            const imgMatch = html.match(/<img[^>]+class="[^"]*ipp[^"]*"[^>]+src="([^"]+)"/);
-            if (imgMatch && imgMatch[1]) return { avatar: imgMatch[1], error: null };
-            return { avatar: null, error: null };
-        } catch (e) {
-            return { avatar: null, error: e.message };
-        }
-    }
-
-    async function refreshAvatars() {
-        const results = getSavedResults();
-        if (results.length === 0) {
-            setStatus('No results to refresh.');
-            return;
-        }
-
-        refreshAbort = false;
-
-        const progressEl = document.getElementById('asl-activity-progress');
-        const refreshBtn = document.getElementById('asl-refresh');
-        const stopBtn = document.getElementById('asl-stop-activity');
-        refreshBtn.style.display = 'none';
-        stopBtn.style.display = 'block';
-        progressEl.style.display = 'block';
-
-        const total = results.length;
-        let refreshed = 0;
-        let updated = 0;
-        let errors = 0;
-
-        for (const p of results) {
-            if (refreshAbort) break;
-
-            refreshed++;
-            progressEl.innerHTML = `
-                Refreshing avatars: <strong>${refreshed}</strong> / ${total}
-                &nbsp;—&nbsp; <span style="color:#6c6">${updated} updated</span>
-                ${errors > 0 ? '&nbsp;/&nbsp; <span style="color:#cc6">' + errors + ' errors</span>' : ''}
-                &nbsp;— ${esc(p.nickname)}
-                <div class="bar"><div class="fill" style="width:${Math.round(refreshed/total*100)}%"></div></div>
-            `;
-
-            const result = await fetchAvatar(p.url);
-
-            if (result.error) {
-                errors++;
-                if (result.error === 429 || result.error === 503) {
-                    progressEl.innerHTML += '<br><span style="color:#cc6">Rate limited — waiting 30 seconds...</span>';
-                    await sleep(30000);
-                }
-            } else if (result.avatar) {
-                p.avatar = result.avatar;
-                updated++;
-            }
-
-            saveResults(results);
-
-            if (refreshed < total && !refreshAbort) {
-                const delay = randomDelay(3000, 8000);
-                await sleep(delay);
-            }
-        }
-
-        stopBtn.style.display = 'none';
-        const msg = refreshAbort
-            ? `Avatar refresh paused — ${refreshed}/${total} checked. ${updated} updated.`
-            : `Avatar refresh complete! ${updated} updated out of ${total}.`;
         progressEl.innerHTML = `<strong>${msg}</strong>`;
         setStatus(msg);
         loadAndDisplayResults();
@@ -961,7 +906,6 @@
         if (results.length === 0) {
             countEl.textContent = 'No results yet.';
             document.getElementById('asl-csv').style.display = 'none';
-            document.getElementById('asl-refresh').style.display = 'none';
             document.getElementById('asl-clear').style.display = 'none';
             document.getElementById('asl-check-activity').style.display = 'none';
             document.getElementById('asl-rtab-count').textContent = '';
@@ -975,7 +919,6 @@
         countEl.textContent = statusText;
 
         document.getElementById('asl-csv').style.display = 'block';
-        document.getElementById('asl-refresh').style.display = 'block';
         document.getElementById('asl-clear').style.display = 'block';
         document.getElementById('asl-rtab-count').textContent = '(' + displayResults.length + ')';
 
@@ -1005,6 +948,8 @@
             });
         }
 
+        const imageCache = getImageCache();
+
         let currentBatch = null;
         for (const p of sorted) {
             if (sortMode === 'newest' && p.batch && p.batch !== currentBatch) {
@@ -1017,9 +962,15 @@
 
             const d = document.createElement('div');
             d.className = 'asl-r';
-            const avImg = p.avatar
-                ? `<img src="${esc(p.avatar)}" alt="" loading="lazy">`
-                : `<div style="width:110px;height:110px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
+            // Use cached base64 image if available, otherwise use original URL
+            const cachedSrc = imageCache[p.nickname];
+            const imgSrc = cachedSrc || p.avatar;
+            let avImg;
+            if (imgSrc) {
+                avImg = `<img src="${esc(imgSrc)}" alt="" loading="lazy" data-nick="${esc(p.nickname)}" crossorigin="anonymous">`;
+            } else {
+                avImg = `<div style="width:110px;height:110px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
+            }
             const av = `<a class="av" href="${esc(p.url)}" target="_blank">${avImg}</a>`;
             const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
 
@@ -1042,6 +993,14 @@
             d.innerHTML = `${av}<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}${activityLine}</div><div class="act"><a href="${esc(p.url)}" target="_blank">Profile</a><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Message</a></div>`;
             container.appendChild(d);
         }
+
+        // Cache images as they load (converts to base64 data URLs for persistence)
+        container.querySelectorAll('img[data-nick]').forEach(img => {
+            if (img.src.startsWith('data:')) return; // Already cached
+            img.addEventListener('load', function() {
+                cacheImageFromElement(this, this.getAttribute('data-nick'));
+            }, { once: true });
+        });
 
         // Switch to results tab
         const s = getSavedState();
