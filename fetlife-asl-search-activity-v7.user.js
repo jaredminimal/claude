@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        7.1.3
+// @version        7.2.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -72,6 +72,7 @@
 
     // Phase 2 state
     let activityCheckAbort = false;
+    let refreshAbort = false;
 
     // =====================
     // STYLES
@@ -244,10 +245,10 @@
 
         document.getElementById('asl-go').addEventListener('click', startNewSearch);
         document.getElementById('asl-csv').addEventListener('click', exportCSV);
-        document.getElementById('asl-refresh').addEventListener('click', () => showResults());
+        document.getElementById('asl-refresh').addEventListener('click', refreshAvatars);
         document.getElementById('asl-clear').addEventListener('click', clearResults);
         document.getElementById('asl-check-activity').addEventListener('click', startActivityCheck);
-        document.getElementById('asl-stop-activity').addEventListener('click', () => { activityCheckAbort = true; });
+        document.getElementById('asl-stop-activity').addEventListener('click', () => { activityCheckAbort = true; refreshAbort = true; });
         document.getElementById('asl-sort').addEventListener('change', loadAndDisplayResults);
 
         // Load any existing results
@@ -712,6 +713,93 @@
         const msg = activityCheckAbort
             ? `Activity check paused — ${checked}/${total} checked. ${active} active, ${inactive} inactive.${remaining > 0 ? ' ' + remaining + ' still unchecked.' : ''}`
             : `Activity check complete! ${active} active, ${inactive} inactive out of ${total} checked.${remaining > 0 ? ' ' + remaining + ' still unchecked.' : ''}`;
+        progressEl.innerHTML = `<strong>${msg}</strong>`;
+        setStatus(msg);
+        loadAndDisplayResults();
+    }
+
+    // =====================
+    // REFRESH AVATARS
+    // =====================
+    async function fetchAvatar(profileUrl) {
+        try {
+            const resp = await fetch(profileUrl, {
+                credentials: 'same-origin',
+                headers: { 'Accept': 'text/html' }
+            });
+            if (!resp.ok) return { avatar: null, error: resp.status };
+            const html = await resp.text();
+            // Look for avatar image in profile page HTML
+            // FetLife profile pages have og:image meta tag with the avatar URL
+            const ogMatch = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/);
+            if (ogMatch && ogMatch[1]) return { avatar: ogMatch[1], error: null };
+            // Fallback: look for avatar img tags
+            const imgMatch = html.match(/<img[^>]+class="[^"]*ipp[^"]*"[^>]+src="([^"]+)"/);
+            if (imgMatch && imgMatch[1]) return { avatar: imgMatch[1], error: null };
+            return { avatar: null, error: null };
+        } catch (e) {
+            return { avatar: null, error: e.message };
+        }
+    }
+
+    async function refreshAvatars() {
+        const results = getSavedResults();
+        if (results.length === 0) {
+            setStatus('No results to refresh.');
+            return;
+        }
+
+        refreshAbort = false;
+
+        const progressEl = document.getElementById('asl-activity-progress');
+        const refreshBtn = document.getElementById('asl-refresh');
+        const stopBtn = document.getElementById('asl-stop-activity');
+        refreshBtn.style.display = 'none';
+        stopBtn.style.display = 'block';
+        progressEl.style.display = 'block';
+
+        const total = results.length;
+        let refreshed = 0;
+        let updated = 0;
+        let errors = 0;
+
+        for (const p of results) {
+            if (refreshAbort) break;
+
+            refreshed++;
+            progressEl.innerHTML = `
+                Refreshing avatars: <strong>${refreshed}</strong> / ${total}
+                &nbsp;—&nbsp; <span style="color:#6c6">${updated} updated</span>
+                ${errors > 0 ? '&nbsp;/&nbsp; <span style="color:#cc6">' + errors + ' errors</span>' : ''}
+                &nbsp;— ${esc(p.nickname)}
+                <div class="bar"><div class="fill" style="width:${Math.round(refreshed/total*100)}%"></div></div>
+            `;
+
+            const result = await fetchAvatar(p.url);
+
+            if (result.error) {
+                errors++;
+                if (result.error === 429 || result.error === 503) {
+                    progressEl.innerHTML += '<br><span style="color:#cc6">Rate limited — waiting 30 seconds...</span>';
+                    await sleep(30000);
+                }
+            } else if (result.avatar) {
+                p.avatar = result.avatar;
+                updated++;
+            }
+
+            saveResults(results);
+
+            if (refreshed < total && !refreshAbort) {
+                const delay = randomDelay(3000, 8000);
+                await sleep(delay);
+            }
+        }
+
+        stopBtn.style.display = 'none';
+        const msg = refreshAbort
+            ? `Avatar refresh paused — ${refreshed}/${total} checked. ${updated} updated.`
+            : `Avatar refresh complete! ${updated} updated out of ${total}.`;
         progressEl.innerHTML = `<strong>${msg}</strong>`;
         setStatus(msg);
         loadAndDisplayResults();
