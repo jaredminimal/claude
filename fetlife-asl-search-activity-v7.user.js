@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        7.1.2
+// @version        7.1.3
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -102,6 +102,7 @@
         #asl-stop{background:#d93;color:#fff;margin-top:6px;display:none}
         #asl-clear{background:#555;color:#fff;margin-top:6px;display:none}
         #asl-csv{background:#2a6;color:#fff;margin-top:6px;display:none}#asl-csv:hover{background:#3b7}
+        #asl-refresh{background:#47a;color:#fff;margin-top:6px;display:none}#asl-refresh:hover{background:#58b}
         #asl-status{margin-top:8px;padding:8px 10px;background:#16213e;border-radius:6px;font-size:13px;color:#ccc;display:none;word-break:break-word}
         #asl-rcount{margin:8px 0 4px;font-size:12px;color:#888}
         #asl-res{margin-top:4px}
@@ -209,6 +210,7 @@
                     <button class="asl-b" id="asl-stop-activity">Stop Activity Check</button>
                     <div id="asl-activity-progress"></div>
                     <button class="asl-b" id="asl-csv">Export to CSV</button>
+                    <button class="asl-b" id="asl-refresh">Refresh Images</button>
                     <button class="asl-b" id="asl-clear">Clear All Results</button>
                     <div id="asl-rcount"></div>
                     <div id="asl-res"></div>
@@ -242,6 +244,7 @@
 
         document.getElementById('asl-go').addEventListener('click', startNewSearch);
         document.getElementById('asl-csv').addEventListener('click', exportCSV);
+        document.getElementById('asl-refresh').addEventListener('click', () => showResults());
         document.getElementById('asl-clear').addEventListener('click', clearResults);
         document.getElementById('asl-check-activity').addEventListener('click', startActivityCheck);
         document.getElementById('asl-stop-activity').addEventListener('click', () => { activityCheckAbort = true; });
@@ -864,6 +867,7 @@
         if (results.length === 0) {
             countEl.textContent = 'No results yet.';
             document.getElementById('asl-csv').style.display = 'none';
+            document.getElementById('asl-refresh').style.display = 'none';
             document.getElementById('asl-clear').style.display = 'none';
             document.getElementById('asl-check-activity').style.display = 'none';
             document.getElementById('asl-rtab-count').textContent = '';
@@ -877,6 +881,7 @@
         countEl.textContent = statusText;
 
         document.getElementById('asl-csv').style.display = 'block';
+        document.getElementById('asl-refresh').style.display = 'block';
         document.getElementById('asl-clear').style.display = 'block';
         document.getElementById('asl-rtab-count').textContent = '(' + displayResults.length + ')';
 
