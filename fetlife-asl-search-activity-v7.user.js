@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        7.2.0
+// @version        7.2.1
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -671,7 +671,13 @@
                 <div class="bar"><div class="fill" style="width:${Math.round(checked/total*100)}%"></div></div>
             `;
 
-            const result = await fetchActivityDate(p.url);
+            const [result, avatarResult] = await Promise.all([
+                fetchActivityDate(p.url),
+                fetchAvatar(p.url)
+            ]);
+
+            // Update avatar if we got a fresh one
+            if (avatarResult.avatar) p.avatar = avatarResult.avatar;
 
             p.activityChecked = true;
             if (result.error) {
