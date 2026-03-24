@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        7.3.0
+// @version        7.3.1
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -31,7 +31,7 @@
     const STORAGE_KEY = 'asl_search_state';
     const RESULTS_KEY = 'asl_search_results';
     const PROGRESS_KEY = 'asl_search_progress';
-    const IMAGE_CACHE_KEY = 'asl_image_cache';
+
 
     // Gender codes used by FetLife
     const GENDERS = [
@@ -311,50 +311,9 @@
         localStorage.setItem(PROGRESS_KEY, JSON.stringify(prog));
     }
 
-    // =====================
-    // IMAGE CACHE (base64 data URLs in localStorage)
-    // =====================
-    function getImageCache() {
-        try { return JSON.parse(localStorage.getItem(IMAGE_CACHE_KEY)) || {}; } catch(e) { return {}; }
-    }
-
-    function saveImageCache(cache) {
-        try {
-            localStorage.setItem(IMAGE_CACHE_KEY, JSON.stringify(cache));
-        } catch(e) {
-            // localStorage full — evict oldest entries
-            const keys = Object.keys(cache);
-            if (keys.length > 50) {
-                const toRemove = keys.slice(0, Math.floor(keys.length / 4));
-                toRemove.forEach(k => delete cache[k]);
-                try { localStorage.setItem(IMAGE_CACHE_KEY, JSON.stringify(cache)); } catch(e2) { /* give up */ }
-            }
-        }
-    }
-
-    function cacheImageFromElement(imgEl, nickname) {
-        try {
-            const canvas = document.createElement('canvas');
-            canvas.width = imgEl.naturalWidth || 110;
-            canvas.height = imgEl.naturalHeight || 110;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(imgEl, 0, 0, canvas.width, canvas.height);
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
-            // Only cache if we got real data (not a broken/empty image)
-            if (dataUrl && dataUrl.length > 100) {
-                const cache = getImageCache();
-                cache[nickname] = dataUrl;
-                saveImageCache(cache);
-            }
-        } catch(e) {
-            // CORS or tainted canvas — can't cache this image
-        }
-    }
-
     function clearResults() {
         localStorage.removeItem(RESULTS_KEY);
         localStorage.removeItem(PROGRESS_KEY);
-        localStorage.removeItem(IMAGE_CACHE_KEY);
         document.getElementById('asl-res').innerHTML = '';
         document.getElementById('asl-rcount').textContent = '';
         document.getElementById('asl-csv').style.display = 'none';
@@ -948,8 +907,6 @@
             });
         }
 
-        const imageCache = getImageCache();
-
         let currentBatch = null;
         for (const p of sorted) {
             if (sortMode === 'newest' && p.batch && p.batch !== currentBatch) {
@@ -962,15 +919,9 @@
 
             const d = document.createElement('div');
             d.className = 'asl-r';
-            // Use cached base64 image if available, otherwise use original URL
-            const cachedSrc = imageCache[p.nickname];
-            const imgSrc = cachedSrc || p.avatar;
-            let avImg;
-            if (imgSrc) {
-                avImg = `<img src="${esc(imgSrc)}" alt="" loading="lazy" data-nick="${esc(p.nickname)}" crossorigin="anonymous">`;
-            } else {
-                avImg = `<div style="width:110px;height:110px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
-            }
+            const avImg = p.avatar
+                ? `<img src="${esc(p.avatar)}" alt="" loading="lazy">`
+                : `<div style="width:110px;height:110px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
             const av = `<a class="av" href="${esc(p.url)}" target="_blank">${avImg}</a>`;
             const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
 
@@ -993,14 +944,6 @@
             d.innerHTML = `${av}<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}${activityLine}</div><div class="act"><a href="${esc(p.url)}" target="_blank">Profile</a><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Message</a></div>`;
             container.appendChild(d);
         }
-
-        // Cache images as they load (converts to base64 data URLs for persistence)
-        container.querySelectorAll('img[data-nick]').forEach(img => {
-            if (img.src.startsWith('data:')) return; // Already cached
-            img.addEventListener('load', function() {
-                cacheImageFromElement(this, this.getAttribute('data-nick'));
-            }, { once: true });
-        });
 
         // Switch to results tab
         const s = getSavedState();
