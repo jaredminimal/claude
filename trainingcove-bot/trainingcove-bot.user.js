@@ -214,7 +214,7 @@
 
   function findButtonByText(text) {
     const selectors =
-      "button, input[type='button'], input[type='submit'], a.btn, a[class*='btn'], a[href], [role='button']";
+      "button, input[type='button'], input[type='submit'], input[type='image'], a.btn, a[class*='btn'], a[href], [role='button']";
     const elements = document.querySelectorAll(selectors);
     const lowerText = text.toLowerCase();
     for (const el of elements) {
@@ -244,72 +244,13 @@
   }
 
   function findForwardArrow() {
-    // Look for the right/forward arrow in the course player navigation bar at bottom
-    // Based on screenshots: it's an image-based arrow, likely an <img> or <a> with arrow graphic
+    // The forward arrow is: INPUT.SlideNext with id ctl00_SlidePlaceHolder_Next
+    const next = document.getElementById("ctl00_SlidePlaceHolder_Next");
+    if (next && next.offsetWidth > 0) return next;
 
-    // Strategy 1: Look for images with arrow-related src names
-    const arrowKeywords = ["forward", "next", "right", "fwd", "arrow"];
-    const allImages = document.querySelectorAll("img");
-    for (const img of allImages) {
-      const src = (img.src || "").toLowerCase();
-      const alt = (img.alt || "").toLowerCase();
-      const title = (img.title || "").toLowerCase();
-      for (const kw of arrowKeywords) {
-        if ((src.includes(kw) || alt.includes(kw) || title.includes(kw)) && img.offsetWidth > 0) {
-          // Return the clickable parent if it's a link
-          const parent = img.closest("a") || img;
-          return parent;
-        }
-      }
-    }
-
-    // Strategy 2: Look for typical navigation elements
-    const selectors = [
-      'a[title*="Next" i]', 'a[title*="Forward" i]',
-      'button[title*="Next" i]', 'button[title*="Forward" i]',
-      '.forward', '.next-btn', '.nav-forward', '#forward', '#next',
-      'a[class*="forward" i]', 'a[class*="next" i]',
-    ];
-    for (const sel of selectors) {
-      try {
-        const el = document.querySelector(sel);
-        if (el && el.offsetWidth > 0) return el;
-      } catch (e) {}
-    }
-
-    // Strategy 3: The right arrow is the second of the two big arrows at the bottom
-    // Look for paired arrow elements (← →)
-    const links = document.querySelectorAll("a");
-    for (const link of links) {
-      const rect = link.getBoundingClientRect();
-      // Arrow at bottom of page, right side
-      if (rect.bottom > window.innerHeight - 100 && rect.left > window.innerWidth / 3) {
-        const imgs = link.querySelectorAll("img");
-        if (imgs.length > 0) {
-          const src = (imgs[0].src || "").toLowerCase();
-          if (src.includes("right") || src.includes("forward") || src.includes("fwd") || src.includes("next")) {
-            return link;
-          }
-        }
-      }
-    }
-
-    // Strategy 4: Check iframes
-    const iframes = document.querySelectorAll("iframe");
-    for (const iframe of iframes) {
-      try {
-        const doc = iframe.contentDocument || iframe.contentWindow.document;
-        const imgs = doc.querySelectorAll("img");
-        for (const img of imgs) {
-          const src = (img.src || "").toLowerCase();
-          for (const kw of arrowKeywords) {
-            if (src.includes(kw) && img.offsetWidth > 0) {
-              return img.closest("a") || img;
-            }
-          }
-        }
-      } catch (e) {}
-    }
+    // Fallback: look by class name
+    const byClass = document.querySelector(".SlideNext, input.SlideNext");
+    if (byClass && byClass.offsetWidth > 0) return byClass;
 
     return null;
   }
@@ -604,6 +545,12 @@
       switch (pageState.type) {
         case "CONTENT_SLIDE":
           await handleContentSlide(pageState);
+          break;
+        case "SECTION_COMPLETE":
+          setStatus("Section complete - proceeding...");
+          logMsg("Section complete, clicking proceed");
+          await sleep(3000);
+          pageState.el.click();
           break;
         case "END_OF_SECTION":
           await handleEndOfSection(pageState);
