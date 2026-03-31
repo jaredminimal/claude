@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TrainingCove Course Bot
 // @namespace    trainingcove-bot
-// @version      3.0
+// @version      3.1
 // @description  Auto-navigates TrainingCove course, answers questions via local Claude API server
 // @match        https://www.trainingcove.com/Members/Courses/go.aspx*
 // @match        https://trainingcove.com/Members/Courses/go.aspx*
@@ -217,8 +217,8 @@
       }
     }
 
-    // Check for multiple-choice answer buttons (A/B/C/D style)
-    const mcButtons = document.querySelectorAll('input.AnswerButton, input[class*="Answer"], input[class*="Choice"], input[class*="Option"]');
+    // Check for multiple-choice answer buttons
+    const mcButtons = document.querySelectorAll('input.MultChoiceButton');
     if (mcButtons.length > 1) {
       return {
         type: "MULTIPLE_CHOICE_QUESTION",
@@ -307,6 +307,8 @@
     let best = "";
     // First pass: find text with question mark
     for (const el of candidates) {
+      // Skip the bot panel
+      if (el.closest("#tcbot-panel")) continue;
       const text = el.textContent.trim();
       if (text.includes("?") && text.length > best.length && text.length < 500) {
         best = text;
@@ -315,6 +317,7 @@
     // Second pass: longest substantial text block
     if (!best) {
       for (const el of candidates) {
+        if (el.closest("#tcbot-panel")) continue;
         const text = el.textContent.trim();
         if (text.length > 30 && text.length < 500 && text.length > best.length) {
           best = text;
