@@ -8,6 +8,8 @@
 // @match        https://www.trainingcove.com/Members/Quiz.aspx*
 // @match        https://trainingcove.com/Members/Quiz.aspx*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @connect      localhost
 // ==/UserScript==
 
@@ -607,6 +609,7 @@
   function start() {
     if (running) return;
     running = true;
+    GM_setValue("tcbot_running", true);
     setStatus("Running...");
     logMsg("Bot started");
     keepaliveInterval = setInterval(keepalive, CONFIG.KEEPALIVE_INTERVAL);
@@ -615,6 +618,7 @@
 
   function stop() {
     running = false;
+    GM_setValue("tcbot_running", false);
     if (loopTimeout) clearTimeout(loopTimeout);
     if (keepaliveInterval) clearInterval(keepaliveInterval);
     setStatus("Stopped");
@@ -633,9 +637,20 @@
 
   // ── Init ───────────────────────────────────────────────────────────
 
-  if (document.readyState === "complete") {
+  function init() {
     createPanel();
+    // Auto-resume if bot was running before page reload
+    if (GM_getValue("tcbot_running", false)) {
+      setTimeout(() => {
+        logMsg("Auto-resuming after page load...");
+        start();
+      }, 2000); // Wait 2s for page to settle
+    }
+  }
+
+  if (document.readyState === "complete") {
+    init();
   } else {
-    window.addEventListener("load", createPanel);
+    window.addEventListener("load", init);
   }
 })();
