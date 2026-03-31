@@ -187,12 +187,25 @@
     const trueBtn = document.getElementById("ctl00_SlidePlaceHolder_True");
     const falseBtn = document.getElementById("ctl00_SlidePlaceHolder_False");
     if (trueBtn && falseBtn && trueBtn.offsetWidth > 0) {
-      return {
-        type: "TRUE_FALSE_QUESTION",
-        trueBtn,
-        falseBtn,
-        doc: document,
-      };
+      // Check if already answered: one button is disabled/grayed out, or answer text shown below
+      const trueDisabled = trueBtn.disabled || trueBtn.style.opacity === "0.5" || trueBtn.style.display === "none";
+      const falseDisabled = falseBtn.disabled || falseBtn.style.opacity === "0.5" || falseBtn.style.display === "none";
+      const bothEnabled = !trueDisabled && !falseDisabled;
+
+      // If both buttons are still fully enabled, it's an unanswered question
+      if (bothEnabled) {
+        return {
+          type: "TRUE_FALSE_QUESTION",
+          trueBtn,
+          falseBtn,
+          doc: document,
+        };
+      }
+      // Otherwise already answered - click Next to proceed
+      const forwardArrow = findForwardArrow();
+      if (forwardArrow) {
+        return { type: "CONTENT_SLIDE", el: forwardArrow };
+      }
     }
 
     // Check for multiple-choice answer buttons (A/B/C/D style)
@@ -417,15 +430,23 @@
       logMsg(`Claude says: ${answerIdx === 0 ? "True" : "False"}`);
       stats.questions++;
       updateStats();
-      await sleep(CONFIG.QUESTION_DELAY);
       btn.click();
+      // After clicking answer, wait for page to update then click Next arrow
+      await sleep(2000);
+      const nextArrow = findForwardArrow();
+      if (nextArrow) {
+        logMsg("Clicking Next to advance past answered question");
+        nextArrow.click();
+      }
     } catch (err) {
       setStatus(`Error: ${err.message}`);
       logMsg(`ERROR: ${err.message}`);
       stats.errors++;
       updateStats();
-      // Fallback: click True
       pageState.trueBtn.click();
+      await sleep(2000);
+      const nextArrow = findForwardArrow();
+      if (nextArrow) nextArrow.click();
     }
   }
 
@@ -442,11 +463,17 @@
       logMsg(`Claude says: ${answerIdx} - ${options[answerIdx]}`);
       stats.questions++;
       updateStats();
-      await sleep(CONFIG.QUESTION_DELAY);
       if (pageState.buttons[answerIdx]) {
         pageState.buttons[answerIdx].click();
       } else {
         pageState.buttons[0].click();
+      }
+      // After clicking answer, wait then click Next arrow
+      await sleep(2000);
+      const nextArrow = findForwardArrow();
+      if (nextArrow) {
+        logMsg("Clicking Next to advance past answered question");
+        nextArrow.click();
       }
     } catch (err) {
       setStatus(`Error: ${err.message}`);
@@ -454,6 +481,9 @@
       stats.errors++;
       updateStats();
       pageState.buttons[0].click();
+      await sleep(2000);
+      const nextArrow = findForwardArrow();
+      if (nextArrow) nextArrow.click();
     }
   }
 
