@@ -149,6 +149,12 @@
   function detectCoursePageType(bodyText) {
     const lowerText = bodyText.toLowerCase();
 
+    // Check for section completion - "Click to Proceed" after completing section
+    const clickToProceed = findButtonByText("Click to Proceed");
+    if (clickToProceed && lowerText.includes("completed this section")) {
+      return { type: "SECTION_COMPLETE", el: clickToProceed };
+    }
+
     // Check for "End of Section" with time remaining
     if (lowerText.includes("end of section")) {
       const updateBtn = findButtonByText("Update Time Remaining");
@@ -157,6 +163,11 @@
       const minutesLeft = timeMatch ? parseInt(timeMatch[1], 10) : 0;
       const forwardArrow = findForwardArrow();
 
+      // If no timer message and there's a "Click to Proceed", section is done
+      if (!timeMatch && clickToProceed) {
+        return { type: "SECTION_COMPLETE", el: clickToProceed };
+      }
+
       return {
         type: "END_OF_SECTION",
         updateBtn,
@@ -164,6 +175,11 @@
         minutesLeft,
         forwardArrow,
       };
+    }
+
+    // Check for any generic "Click to Proceed" or "Proceed" on course pages
+    if (clickToProceed) {
+      return { type: "SECTION_COMPLETE", el: clickToProceed };
     }
 
     // Check for embedded interactive questions (radio buttons)
