@@ -19,10 +19,10 @@
   // ── Configuration ──────────────────────────────────────────────────
   const CONFIG = {
     SERVER_URL: "http://localhost:3847",
-    SLIDE_DELAY_MIN: 12000, // 12s min between slide advances
-    SLIDE_DELAY_MAX: 25000, // 25s max
-    QUESTION_DELAY: 3000, // 3s after answering before proceeding
-    POLL_INTERVAL: 3000, // 3s between page state checks
+    SLIDE_DELAY_MIN: 1000, // 1s min between slide advances
+    SLIDE_DELAY_MAX: 3000, // 3s max
+    QUESTION_DELAY: 1500, // 1.5s after answering before proceeding
+    POLL_INTERVAL: 1500, // 1.5s between page state checks
     KEEPALIVE_INTERVAL: 600000, // 10 min keepalive
     TIMER_CHECK_INTERVAL: 60000, // 1 min between "Update Time Remaining" clicks
   };
