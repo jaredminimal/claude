@@ -1,0 +1,12 @@
+{
+  "name": "trainingcove-bot",
+  "version": "1.0.0",
+  "description": "Local API server for TrainingCove course bot - answers questions via Claude API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  }
+}
