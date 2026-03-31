@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TrainingCove Course Bot
 // @namespace    trainingcove-bot
-// @version      2.0
+// @version      3.0
 // @description  Auto-navigates TrainingCove course, answers questions via local Claude API server
 // @match        https://www.trainingcove.com/Members/Courses/go.aspx*
 // @match        https://trainingcove.com/Members/Courses/go.aspx*
@@ -150,6 +150,15 @@
 
   function detectCoursePageType(bodyText) {
     const lowerText = bodyText.toLowerCase();
+
+    // If we just answered a question on the previous page load, click Next immediately
+    if (GM_getValue("tcbot_just_answered", false)) {
+      GM_setValue("tcbot_just_answered", false);
+      const forwardArrow = findForwardArrow();
+      if (forwardArrow) {
+        return { type: "CONTENT_SLIDE", el: forwardArrow };
+      }
+    }
 
     // Check for section completion - "Click to Proceed" after completing section
     const clickToProceed = findButtonByText("Click to Proceed");
@@ -430,23 +439,16 @@
       logMsg(`Claude says: ${answerIdx === 0 ? "True" : "False"}`);
       stats.questions++;
       updateStats();
-      btn.click();
-      // After clicking answer, wait for page to update then click Next arrow
-      await sleep(2000);
-      const nextArrow = findForwardArrow();
-      if (nextArrow) {
-        logMsg("Clicking Next to advance past answered question");
-        nextArrow.click();
-      }
+      // Set flag so after page reload we just click Next
+      GM_setValue("tcbot_just_answered", true);
+      btn.click(); // This triggers a form submit / page reload
     } catch (err) {
       setStatus(`Error: ${err.message}`);
       logMsg(`ERROR: ${err.message}`);
       stats.errors++;
       updateStats();
+      GM_setValue("tcbot_just_answered", true);
       pageState.trueBtn.click();
-      await sleep(2000);
-      const nextArrow = findForwardArrow();
-      if (nextArrow) nextArrow.click();
     }
   }
 
@@ -463,27 +465,19 @@
       logMsg(`Claude says: ${answerIdx} - ${options[answerIdx]}`);
       stats.questions++;
       updateStats();
+      GM_setValue("tcbot_just_answered", true);
       if (pageState.buttons[answerIdx]) {
         pageState.buttons[answerIdx].click();
       } else {
         pageState.buttons[0].click();
-      }
-      // After clicking answer, wait then click Next arrow
-      await sleep(2000);
-      const nextArrow = findForwardArrow();
-      if (nextArrow) {
-        logMsg("Clicking Next to advance past answered question");
-        nextArrow.click();
       }
     } catch (err) {
       setStatus(`Error: ${err.message}`);
       logMsg(`ERROR: ${err.message}`);
       stats.errors++;
       updateStats();
+      GM_setValue("tcbot_just_answered", true);
       pageState.buttons[0].click();
-      await sleep(2000);
-      const nextArrow = findForwardArrow();
-      if (nextArrow) nextArrow.click();
     }
   }
 
