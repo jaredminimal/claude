@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TrainingCove Course Bot
 // @namespace    trainingcove-bot
-// @version      3.1
+// @version      3.2
 // @description  Auto-navigates TrainingCove course, answers questions via local Claude API server
 // @match        https://www.trainingcove.com/Members/Courses/go.aspx*
 // @match        https://trainingcove.com/Members/Courses/go.aspx*
@@ -151,12 +151,18 @@
   function detectCoursePageType(bodyText) {
     const lowerText = bodyText.toLowerCase();
 
-    // If we just answered a question on the previous page load, click Next immediately
+    // If we just answered a question on the previous page load, check if correct or incorrect
     if (GM_getValue("tcbot_just_answered", false)) {
       GM_setValue("tcbot_just_answered", false);
-      const forwardArrow = findForwardArrow();
-      if (forwardArrow) {
-        return { type: "CONTENT_SLIDE", el: forwardArrow };
+      // If page says "Incorrect", don't advance - let it re-detect the question
+      if (lowerText.includes("incorrect")) {
+        // Fall through to re-detect the question and try again
+      } else {
+        // Correct or no feedback - click Next to advance
+        const forwardArrow = findForwardArrow();
+        if (forwardArrow) {
+          return { type: "CONTENT_SLIDE", el: forwardArrow };
+        }
       }
     }
 
@@ -433,6 +439,32 @@
   async function handleTrueFalseQuestion(pageState) {
     setStatus("True/False question - asking Claude...");
     const question = extractQuestionText(pageState.doc || document);
+
+    // Check if one button is already disabled (wrong answer on retry)
+    const trueEnabled = !pageState.trueBtn.disabled;
+    const falseEnabled = !pageState.falseBtn.disabled;
+
+    if (!trueEnabled && !falseEnabled) {
+      // Both disabled, just advance
+      const nextArrow = findForwardArrow();
+      if (nextArrow) nextArrow.click();
+      return;
+    }
+
+    // If only one is enabled, pick that one (it must be correct)
+    if (trueEnabled && !falseEnabled) {
+      logMsg("Only True enabled - selecting it");
+      GM_setValue("tcbot_just_answered", true);
+      pageState.trueBtn.click();
+      return;
+    }
+    if (!trueEnabled && falseEnabled) {
+      logMsg("Only False enabled - selecting it");
+      GM_setValue("tcbot_just_answered", true);
+      pageState.falseBtn.click();
+      return;
+    }
+
     logMsg(`T/F Q: ${question.substring(0, 80)}`);
 
     try {
@@ -442,9 +474,8 @@
       logMsg(`Claude says: ${answerIdx === 0 ? "True" : "False"}`);
       stats.questions++;
       updateStats();
-      // Set flag so after page reload we just click Next
       GM_setValue("tcbot_just_answered", true);
-      btn.click(); // This triggers a form submit / page reload
+      btn.click();
     } catch (err) {
       setStatus(`Error: ${err.message}`);
       logMsg(`ERROR: ${err.message}`);
@@ -459,28 +490,43 @@
     setStatus("Multiple choice - asking Claude...");
     const question = extractQuestionText(pageState.doc || document);
     const options = Array.from(pageState.buttons).map(btn => (btn.value || btn.textContent || "").trim());
+
+    // Check which buttons are disabled (already tried and wrong)
+    const enabledIdxs = [];
+    const enabledOptions = [];
+    Array.from(pageState.buttons).forEach((btn, i) => {
+      if (!btn.disabled) {
+        enabledIdxs.push(i);
+        enabledOptions.push(options[i]);
+      }
+    });
+
     logMsg(`MC Q: ${question.substring(0, 80)}`);
-    logMsg(`Options: ${options.join(" | ")}`);
+    logMsg(`Options: ${enabledOptions.join(" | ")} (${enabledOptions.length} remaining)`);
+
+    if (enabledOptions.length === 0) {
+      // All disabled, just click Next
+      const nextArrow = findForwardArrow();
+      if (nextArrow) nextArrow.click();
+      return;
+    }
 
     try {
-      const answerIdx = await askClaude(question, options);
-      setStatus(`Answer: ${options[answerIdx]}`);
-      logMsg(`Claude says: ${answerIdx} - ${options[answerIdx]}`);
+      const answerIdx = await askClaude(question, enabledOptions);
+      const actualIdx = enabledIdxs[answerIdx] !== undefined ? enabledIdxs[answerIdx] : enabledIdxs[0];
+      setStatus(`Answer: ${options[actualIdx]}`);
+      logMsg(`Claude says: ${options[actualIdx]}`);
       stats.questions++;
       updateStats();
       GM_setValue("tcbot_just_answered", true);
-      if (pageState.buttons[answerIdx]) {
-        pageState.buttons[answerIdx].click();
-      } else {
-        pageState.buttons[0].click();
-      }
+      pageState.buttons[actualIdx].click();
     } catch (err) {
       setStatus(`Error: ${err.message}`);
       logMsg(`ERROR: ${err.message}`);
       stats.errors++;
       updateStats();
       GM_setValue("tcbot_just_answered", true);
-      pageState.buttons[0].click();
+      pageState.buttons[enabledIdxs[0]].click();
     }
   }
 
