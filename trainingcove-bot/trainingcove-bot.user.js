@@ -165,7 +165,6 @@
       const minutesLeft = timeMatch ? parseInt(timeMatch[1], 10) : 0;
       const forwardArrow = findForwardArrow();
 
-      // If no timer message and there's a "Click to Proceed", section is done
       if (!timeMatch && clickToProceed) {
         return { type: "SECTION_COMPLETE", el: clickToProceed };
       }
@@ -179,13 +178,40 @@
       };
     }
 
-    // Check for any generic "Click to Proceed" or "Proceed" on course pages
+    // Check for any generic "Click to Proceed" on course pages
     if (clickToProceed) {
       return { type: "SECTION_COMPLETE", el: clickToProceed };
     }
 
-    // Check for embedded interactive questions (radio buttons)
-    // Check iframes first
+    // Check for True/False question buttons
+    const trueBtn = document.getElementById("ctl00_SlidePlaceHolder_True");
+    const falseBtn = document.getElementById("ctl00_SlidePlaceHolder_False");
+    if (trueBtn && falseBtn && trueBtn.offsetWidth > 0) {
+      return {
+        type: "TRUE_FALSE_QUESTION",
+        trueBtn,
+        falseBtn,
+        doc: document,
+      };
+    }
+
+    // Check for multiple-choice answer buttons (A/B/C/D style)
+    const mcButtons = document.querySelectorAll('input.AnswerButton, input[class*="Answer"], input[class*="Choice"], input[class*="Option"]');
+    if (mcButtons.length > 1) {
+      return {
+        type: "MULTIPLE_CHOICE_QUESTION",
+        buttons: mcButtons,
+        doc: document,
+      };
+    }
+
+    // Check for radio button questions (fallback)
+    const radios = document.querySelectorAll('input[type="radio"]');
+    if (radios.length > 0) {
+      return { type: "EMBEDDED_QUESTION", radios, doc: document };
+    }
+
+    // Check iframes for questions
     const iframes = document.querySelectorAll("iframe");
     for (const iframe of iframes) {
       try {
@@ -195,12 +221,6 @@
           return { type: "EMBEDDED_QUESTION", radios: iframeRadios, doc: iframeDoc };
         }
       } catch (e) {}
-    }
-
-    // Check main document for radio buttons
-    const radios = document.querySelectorAll('input[type="radio"]');
-    if (radios.length > 0) {
-      return { type: "EMBEDDED_QUESTION", radios, doc: document };
     }
 
     // Regular content slide - find forward arrow
@@ -385,6 +405,58 @@
     }
   }
 
+  async function handleTrueFalseQuestion(pageState) {
+    setStatus("True/False question - asking Claude...");
+    const question = extractQuestionText(pageState.doc || document);
+    logMsg(`T/F Q: ${question.substring(0, 80)}`);
+
+    try {
+      const answerIdx = await askClaude(question, ["True", "False"]);
+      const btn = answerIdx === 0 ? pageState.trueBtn : pageState.falseBtn;
+      setStatus(`Answer: ${answerIdx === 0 ? "True" : "False"}`);
+      logMsg(`Claude says: ${answerIdx === 0 ? "True" : "False"}`);
+      stats.questions++;
+      updateStats();
+      await sleep(CONFIG.QUESTION_DELAY);
+      btn.click();
+    } catch (err) {
+      setStatus(`Error: ${err.message}`);
+      logMsg(`ERROR: ${err.message}`);
+      stats.errors++;
+      updateStats();
+      // Fallback: click True
+      pageState.trueBtn.click();
+    }
+  }
+
+  async function handleMultipleChoiceQuestion(pageState) {
+    setStatus("Multiple choice - asking Claude...");
+    const question = extractQuestionText(pageState.doc || document);
+    const options = Array.from(pageState.buttons).map(btn => (btn.value || btn.textContent || "").trim());
+    logMsg(`MC Q: ${question.substring(0, 80)}`);
+    logMsg(`Options: ${options.join(" | ")}`);
+
+    try {
+      const answerIdx = await askClaude(question, options);
+      setStatus(`Answer: ${options[answerIdx]}`);
+      logMsg(`Claude says: ${answerIdx} - ${options[answerIdx]}`);
+      stats.questions++;
+      updateStats();
+      await sleep(CONFIG.QUESTION_DELAY);
+      if (pageState.buttons[answerIdx]) {
+        pageState.buttons[answerIdx].click();
+      } else {
+        pageState.buttons[0].click();
+      }
+    } catch (err) {
+      setStatus(`Error: ${err.message}`);
+      logMsg(`ERROR: ${err.message}`);
+      stats.errors++;
+      updateStats();
+      pageState.buttons[0].click();
+    }
+  }
+
   async function handleEmbeddedQuestion(pageState) {
     setStatus("Question - asking Claude...");
     const doc = pageState.doc || document;
@@ -556,6 +628,12 @@
           break;
         case "END_OF_SECTION":
           await handleEndOfSection(pageState);
+          break;
+        case "TRUE_FALSE_QUESTION":
+          await handleTrueFalseQuestion(pageState);
+          break;
+        case "MULTIPLE_CHOICE_QUESTION":
+          await handleMultipleChoiceQuestion(pageState);
           break;
         case "EMBEDDED_QUESTION":
           await handleEmbeddedQuestion(pageState);
