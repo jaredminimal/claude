@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        7.3.1
+// @version        7.3.2
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -299,7 +299,19 @@
     }
 
     function saveResults(results) {
-        localStorage.setItem(RESULTS_KEY, JSON.stringify(results));
+        try {
+            localStorage.setItem(RESULTS_KEY, JSON.stringify(results));
+        } catch(e) {
+            // localStorage quota exceeded — strip avatar URLs to free space
+            console.warn('[ASL] localStorage full, stripping avatars to save space...');
+            for (const r of results) { r.avatar = ''; }
+            try {
+                localStorage.setItem(RESULTS_KEY, JSON.stringify(results));
+            } catch(e2) {
+                console.error('[ASL] localStorage still full after stripping avatars. Results may be lost.');
+                alert('Storage is full! Export your results to CSV before they are lost, then clear results to free space.');
+            }
+        }
     }
 
     function getProgress() {
@@ -327,6 +339,15 @@
     // START A NEW SEARCH
     // =====================
     function startNewSearch() {
+        // Force-clear any stuck search state
+        const old = getSavedState();
+        if (old && old.active) {
+            old.active = false;
+            saveState(old);
+            if (window._aslNavTimer) { clearTimeout(window._aslNavTimer); window._aslNavTimer = null; }
+            removeCrawlBanner();
+        }
+
         const loc = window.location.href.split('?')[0].split('#')[0];
         let baseURL = null;
 
@@ -466,7 +487,7 @@
 
             const nextURL = s.baseURL + '?page=' + (pageNum + 1);
             console.log('[ASL] Next page in', s.params.delay/1000, 'seconds:', nextURL);
-            setTimeout(() => {
+            window._aslNavTimer = setTimeout(() => {
                 window.location.href = nextURL;
             }, s.params.delay);
         });
@@ -544,6 +565,8 @@
     }
 
     function stopCrawl() {
+        // Clear pending navigation timer
+        if (window._aslNavTimer) { clearTimeout(window._aslNavTimer); window._aslNavTimer = null; }
         const s = getSavedState();
         if (s) {
             s.active = false;
