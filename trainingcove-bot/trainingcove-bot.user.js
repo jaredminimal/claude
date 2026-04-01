@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TrainingCove Course Bot
 // @namespace    trainingcove-bot
-// @version      3.2
+// @version      3.3
 // @description  Auto-navigates TrainingCove course, answers questions via local Claude API server
 // @match        https://www.trainingcove.com/Members/Courses/go.aspx*
 // @match        https://trainingcove.com/Members/Courses/go.aspx*
@@ -150,6 +150,10 @@
 
   function detectCoursePageType(bodyText) {
     const lowerText = bodyText.toLowerCase();
+
+    // Check for quiz start on course page (Begin Quiz button)
+    const beginQuizBtn = findButtonByText("Begin Quiz");
+    if (beginQuizBtn) return { type: "QUIZ_START", el: beginQuizBtn };
 
     // If we just answered a question on the previous page load, check if correct or incorrect
     if (GM_getValue("tcbot_just_answered", false)) {
