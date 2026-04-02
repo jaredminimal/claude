@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TrainingCove Course Bot
 // @namespace    trainingcove-bot
-// @version      3.3
+// @version      3.4
 // @description  Auto-navigates TrainingCove course, answers questions via local Claude API server
 // @match        https://www.trainingcove.com/Members/Courses/go.aspx*
 // @match        https://trainingcove.com/Members/Courses/go.aspx*
@@ -441,34 +441,29 @@
   }
 
   async function handleTrueFalseQuestion(pageState) {
-    setStatus("True/False question - asking Claude...");
     const question = extractQuestionText(pageState.doc || document);
+    const bodyText = (document.body.innerText || "").toLowerCase();
 
-    // Check if one button is already disabled (wrong answer on retry)
-    const trueEnabled = !pageState.trueBtn.disabled;
-    const falseEnabled = !pageState.falseBtn.disabled;
-
-    if (!trueEnabled && !falseEnabled) {
-      // Both disabled, just advance
-      const nextArrow = findForwardArrow();
-      if (nextArrow) nextArrow.click();
+    // If page says "Incorrect", we already tried one answer - pick the OTHER one
+    if (bodyText.includes("incorrect")) {
+      const lastAnswer = GM_getValue("tcbot_last_tf_answer", -1);
+      if (lastAnswer === 0) {
+        // We tried True, it was wrong - pick False
+        logMsg("Incorrect - switching to False");
+        GM_setValue("tcbot_just_answered", true);
+        GM_setValue("tcbot_last_tf_answer", 1);
+        pageState.falseBtn.click();
+      } else {
+        // We tried False (or unknown), it was wrong - pick True
+        logMsg("Incorrect - switching to True");
+        GM_setValue("tcbot_just_answered", true);
+        GM_setValue("tcbot_last_tf_answer", 0);
+        pageState.trueBtn.click();
+      }
       return;
     }
 
-    // If only one is enabled, pick that one (it must be correct)
-    if (trueEnabled && !falseEnabled) {
-      logMsg("Only True enabled - selecting it");
-      GM_setValue("tcbot_just_answered", true);
-      pageState.trueBtn.click();
-      return;
-    }
-    if (!trueEnabled && falseEnabled) {
-      logMsg("Only False enabled - selecting it");
-      GM_setValue("tcbot_just_answered", true);
-      pageState.falseBtn.click();
-      return;
-    }
-
+    setStatus("True/False question - asking Claude...");
     logMsg(`T/F Q: ${question.substring(0, 80)}`);
 
     try {
@@ -479,6 +474,7 @@
       stats.questions++;
       updateStats();
       GM_setValue("tcbot_just_answered", true);
+      GM_setValue("tcbot_last_tf_answer", answerIdx);
       btn.click();
     } catch (err) {
       setStatus(`Error: ${err.message}`);
@@ -486,43 +482,62 @@
       stats.errors++;
       updateStats();
       GM_setValue("tcbot_just_answered", true);
+      GM_setValue("tcbot_last_tf_answer", 0);
       pageState.trueBtn.click();
     }
   }
 
   async function handleMultipleChoiceQuestion(pageState) {
-    setStatus("Multiple choice - asking Claude...");
     const question = extractQuestionText(pageState.doc || document);
     const options = Array.from(pageState.buttons).map(btn => (btn.value || btn.textContent || "").trim());
+    const bodyText = (document.body.innerText || "").toLowerCase();
 
-    // Check which buttons are disabled (already tried and wrong)
-    const enabledIdxs = [];
-    const enabledOptions = [];
+    // Track which MC answers we've already tried (wrong) for this question
+    const questionKey = question.substring(0, 50);
+    let triedAnswers = GM_getValue("tcbot_mc_tried_" + questionKey, []);
+
+    // Filter out already-tried answers AND disabled buttons
+    const availableIdxs = [];
+    const availableOptions = [];
     Array.from(pageState.buttons).forEach((btn, i) => {
-      if (!btn.disabled) {
-        enabledIdxs.push(i);
-        enabledOptions.push(options[i]);
+      if (!btn.disabled && !triedAnswers.includes(i)) {
+        availableIdxs.push(i);
+        availableOptions.push(options[i]);
       }
     });
 
     logMsg(`MC Q: ${question.substring(0, 80)}`);
-    logMsg(`Options: ${enabledOptions.join(" | ")} (${enabledOptions.length} remaining)`);
+    logMsg(`Options: ${availableOptions.join(" | ")} (${availableOptions.length} remaining, tried: ${triedAnswers.length})`);
 
-    if (enabledOptions.length === 0) {
-      // All disabled, just click Next
+    if (availableOptions.length === 0) {
+      // All tried or disabled, clear and try again or click Next
+      GM_setValue("tcbot_mc_tried_" + questionKey, []);
       const nextArrow = findForwardArrow();
       if (nextArrow) nextArrow.click();
       return;
     }
 
+    // If only 1 option left, just pick it
+    if (availableOptions.length === 1) {
+      logMsg(`Only one option left: ${availableOptions[0]}`);
+      GM_setValue("tcbot_just_answered", true);
+      triedAnswers.push(availableIdxs[0]);
+      GM_setValue("tcbot_mc_tried_" + questionKey, triedAnswers);
+      pageState.buttons[availableIdxs[0]].click();
+      return;
+    }
+
+    setStatus("Multiple choice - asking Claude...");
     try {
-      const answerIdx = await askClaude(question, enabledOptions);
-      const actualIdx = enabledIdxs[answerIdx] !== undefined ? enabledIdxs[answerIdx] : enabledIdxs[0];
+      const answerIdx = await askClaude(question, availableOptions);
+      const actualIdx = availableIdxs[answerIdx] !== undefined ? availableIdxs[answerIdx] : availableIdxs[0];
       setStatus(`Answer: ${options[actualIdx]}`);
       logMsg(`Claude says: ${options[actualIdx]}`);
       stats.questions++;
       updateStats();
       GM_setValue("tcbot_just_answered", true);
+      triedAnswers.push(actualIdx);
+      GM_setValue("tcbot_mc_tried_" + questionKey, triedAnswers);
       pageState.buttons[actualIdx].click();
     } catch (err) {
       setStatus(`Error: ${err.message}`);
@@ -530,7 +545,9 @@
       stats.errors++;
       updateStats();
       GM_setValue("tcbot_just_answered", true);
-      pageState.buttons[enabledIdxs[0]].click();
+      triedAnswers.push(availableIdxs[0]);
+      GM_setValue("tcbot_mc_tried_" + questionKey, triedAnswers);
+      pageState.buttons[availableIdxs[0]].click();
     }
   }
 
