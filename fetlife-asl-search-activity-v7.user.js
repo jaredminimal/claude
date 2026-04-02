@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.0.2
+// @version        8.0.3
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -928,6 +928,13 @@
     // =====================
     // DISPLAY RESULTS
     // =====================
+    function makePlaceholder() {
+        const div = document.createElement('div');
+        Object.assign(div.style, {width:'110px',height:'110px',borderRadius:'8px',background:'#333',display:'flex',alignItems:'center',justifyContent:'center',color:'#666',fontSize:'24px',flexShrink:'0'});
+        div.textContent = '?';
+        return div;
+    }
+
     async function loadAndDisplayResults() {
         const results = await dbGetAllResults();
         const container = document.getElementById('asl-res');
@@ -1017,10 +1024,24 @@
 
                 const d = document.createElement('div');
                 d.className = 'asl-r';
-                const avImg = p.avatar
-                    ? `<img src="${esc(p.avatar)}" alt="" loading="lazy" onerror="this.style.display='none';this.parentElement.innerHTML='<div style=\\'width:110px;height:110px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px\\'>?</div>';">`
-                    : `<div style="width:110px;height:110px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
-                const av = `<a class="av" href="${esc(p.url)}" target="_blank">${avImg}</a>`;
+
+                // Build avatar with proper error handling (no inline onerror)
+                const avLink = document.createElement('a');
+                avLink.className = 'av';
+                avLink.href = p.url;
+                avLink.target = '_blank';
+                if (p.avatar) {
+                    const img = document.createElement('img');
+                    img.src = p.avatar;
+                    img.alt = '';
+                    img.loading = 'lazy';
+                    img.addEventListener('error', function() {
+                        this.replaceWith(makePlaceholder());
+                    });
+                    avLink.appendChild(img);
+                } else {
+                    avLink.appendChild(makePlaceholder());
+                }
                 const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
 
                 let activityLine = '';
@@ -1038,7 +1059,9 @@
                     }
                 }
 
-                d.innerHTML = `${av}<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}${activityLine}</div><div class="act"><a href="${esc(p.url)}" target="_blank">Profile</a><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Message</a></div>`;
+                d.appendChild(avLink);
+                const infoHtml = `<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}${activityLine}</div><div class="act"><a href="${esc(p.url)}" target="_blank">Profile</a><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Message</a></div>`;
+                d.insertAdjacentHTML('beforeend', infoHtml);
                 container.appendChild(d);
             }
             shown += batch.length;
