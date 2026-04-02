@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.0.3
+// @version        8.1.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
 // @run-at         document-idle
 // @noframes
+// @grant          GM_xmlhttpRequest
+// @connect        fetlife.com
 // ==/UserScript==
 
 (function () {
@@ -662,24 +664,42 @@
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    async function fetchActivityDate(profileUrl) {
-        try {
-            // Use FetLife's JSON API: /{nickname}/activity returns activity feed JSON
-            // with story_groups[].stories[].created_at timestamps.
-            // This works reliably unlike HTML scraping (FetLife is a Vue SPA that
-            // returns empty shells for HTML fetches).
-            const activityUrl = profileUrl.replace(/\/?$/, '/activity');
-            const resp = await fetch(activityUrl, {
-                credentials: 'same-origin',
-                headers: {
-                    'Accept': 'application/json',
+    // GM_xmlhttpRequest wrapper — bypasses FetLife's service worker
+    function gmFetch(url, headers) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: url,
+                headers: headers || {},
+                onload: function(resp) {
+                    resolve({
+                        ok: resp.status >= 200 && resp.status < 300,
+                        status: resp.status,
+                        responseText: resp.responseText,
+                    });
+                },
+                onerror: function(err) {
+                    reject(err);
                 }
             });
+        });
+    }
+
+    async function fetchActivityDate(profileUrl) {
+        try {
+            const activityUrl = profileUrl.replace(/\/?$/, '/activity');
+            const resp = await gmFetch(activityUrl, { 'Accept': 'application/json' });
+
             if (!resp.ok) {
                 console.log('[ASL] Activity fetch failed:', resp.status, profileUrl);
                 return { date: null, error: resp.status };
             }
-            const data = await resp.json();
+
+            let data;
+            try { data = JSON.parse(resp.responseText); } catch(e) {
+                console.log('[ASL] Activity response not JSON, trying HTML parse for:', profileUrl);
+                return parseActivityFromHtml(resp.responseText);
+            }
 
             // Find the most recent created_at from any story in any story_group
             let latest = null;
@@ -700,6 +720,21 @@
             console.error('[ASL] Activity fetch error:', e, profileUrl);
             return { date: null, error: e.message };
         }
+    }
+
+    function parseActivityFromHtml(html) {
+        // Fallback: try to find activity timestamps in HTML
+        const timeMatches = html.match(/datetime="([^"]+)"/g);
+        if (timeMatches && timeMatches.length > 0) {
+            let latest = null;
+            for (const m of timeMatches) {
+                const dateStr = m.match(/datetime="([^"]+)"/)[1];
+                const d = new Date(dateStr);
+                if (!isNaN(d.getTime()) && (!latest || d > latest)) latest = d;
+            }
+            return { date: latest, error: null };
+        }
+        return { date: null, error: null };
     }
 
     async function startActivityCheck() {
