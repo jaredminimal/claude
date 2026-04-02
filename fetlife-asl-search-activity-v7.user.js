@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.0.1
+// @version        8.0.2
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -1017,10 +1017,9 @@
 
                 const d = document.createElement('div');
                 d.className = 'asl-r';
-                const placeholder = `<div style="width:110px;height:110px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
                 const avImg = p.avatar
-                    ? `<img src="${esc(p.avatar)}" alt="" loading="lazy" onerror="this.outerHTML='${placeholder.replace(/'/g, "\\'")}';">`
-                    : placeholder;
+                    ? `<img src="${esc(p.avatar)}" alt="" loading="lazy" onerror="this.style.display='none';this.parentElement.innerHTML='<div style=\\'width:110px;height:110px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px\\'>?</div>';">`
+                    : `<div style="width:110px;height:110px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
                 const av = `<a class="av" href="${esc(p.url)}" target="_blank">${avImg}</a>`;
                 const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
 
