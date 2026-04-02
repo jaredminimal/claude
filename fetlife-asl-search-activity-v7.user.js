@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.0.0
+// @version        8.0.1
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -195,6 +195,7 @@
         #asl-stop{background:#d93;color:#fff;margin-top:6px;display:none}
         #asl-clear{background:#555;color:#fff;margin-top:6px;display:none}
         #asl-csv{background:#2a6;color:#fff;margin-top:6px;display:none}#asl-csv:hover{background:#3b7}
+        #asl-load-more{background:#47a;color:#fff;margin-top:6px;cursor:pointer}#asl-load-more:hover{background:#58b}
         #asl-status{margin-top:8px;padding:8px 10px;background:#16213e;border-radius:6px;font-size:13px;color:#ccc;display:none;word-break:break-word}
         #asl-rcount{margin:8px 0 4px;font-size:12px;color:#888}
         #asl-res{margin-top:4px}
@@ -811,7 +812,11 @@
 
             const rawText = card.textContent.replace(/\s+/g, ' ').trim();
             const img = card.querySelector('img');
-            const avatar = img ? img.src : '';
+            let avatar = '';
+            if (img) {
+                // Try multiple sources — FetLife may use lazy loading
+                avatar = img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('src') || '';
+            }
 
             let infoText = rawText;
             if (rawText.toLowerCase().startsWith(nickname.toLowerCase())) {
@@ -993,43 +998,66 @@
             });
         }
 
-        let currentBatch = null;
-        for (const p of sorted) {
-            if (sortMode === 'newest' && p.batch && p.batch !== currentBatch) {
-                currentBatch = p.batch;
-                const divider = document.createElement('div');
-                divider.className = 'asl-batch-divider';
-                divider.textContent = '— Search ' + p.batch + ' (pages ' + (p.batchPages || '?') + ') —';
-                container.appendChild(divider);
-            }
+        // Paginated rendering — show 50 at a time
+        const PAGE_SIZE = 50;
+        let shown = 0;
 
-            const d = document.createElement('div');
-            d.className = 'asl-r';
-            const avImg = p.avatar
-                ? `<img src="${esc(p.avatar)}" alt="" loading="lazy">`
-                : `<div style="width:110px;height:110px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
-            const av = `<a class="av" href="${esc(p.url)}" target="_blank">${avImg}</a>`;
-            const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
+        function renderBatch() {
+            const batch = sorted.slice(shown, shown + PAGE_SIZE);
+            let currentBatch = shown > 0 ? (sorted[shown - 1] || {}).batch : null;
 
-            // Activity line
-            let activityLine = '';
-            if (p.activityChecked) {
-                if (p.lastActivity) {
-                    const d = new Date(p.lastActivity);
-                    const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-                    const daysAgo = Math.floor((Date.now() - d.getTime()) / 86400000);
-                    const isRecent = daysAgo <= (activityDays || 90);
-                    activityLine = `<div class="m ${isRecent ? 'active' : 'inactive'}">Last active: ${dateStr} (${daysAgo}d ago)</div>`;
-                } else if (p.activityError) {
-                    activityLine = `<div class="m inactive">Activity check failed (${p.activityError})</div>`;
-                } else {
-                    activityLine = `<div class="m inactive">No activity found</div>`;
+            for (const p of batch) {
+                if (sortMode === 'newest' && p.batch && p.batch !== currentBatch) {
+                    currentBatch = p.batch;
+                    const divider = document.createElement('div');
+                    divider.className = 'asl-batch-divider';
+                    divider.textContent = '— Search ' + p.batch + ' (pages ' + (p.batchPages || '?') + ') —';
+                    container.appendChild(divider);
                 }
-            }
 
-            d.innerHTML = `${av}<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}${activityLine}</div><div class="act"><a href="${esc(p.url)}" target="_blank">Profile</a><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Message</a></div>`;
-            container.appendChild(d);
+                const d = document.createElement('div');
+                d.className = 'asl-r';
+                const placeholder = `<div style="width:110px;height:110px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
+                const avImg = p.avatar
+                    ? `<img src="${esc(p.avatar)}" alt="" loading="lazy" onerror="this.outerHTML='${placeholder.replace(/'/g, "\\'")}';">`
+                    : placeholder;
+                const av = `<a class="av" href="${esc(p.url)}" target="_blank">${avImg}</a>`;
+                const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
+
+                let activityLine = '';
+                if (p.activityChecked) {
+                    if (p.lastActivity) {
+                        const d = new Date(p.lastActivity);
+                        const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                        const daysAgo = Math.floor((Date.now() - d.getTime()) / 86400000);
+                        const isRecent = daysAgo <= (activityDays || 90);
+                        activityLine = `<div class="m ${isRecent ? 'active' : 'inactive'}">Last active: ${dateStr} (${daysAgo}d ago)</div>`;
+                    } else if (p.activityError) {
+                        activityLine = `<div class="m inactive">Activity check failed (${p.activityError})</div>`;
+                    } else {
+                        activityLine = `<div class="m inactive">No activity found</div>`;
+                    }
+                }
+
+                d.innerHTML = `${av}<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}${activityLine}</div><div class="act"><a href="${esc(p.url)}" target="_blank">Profile</a><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Message</a></div>`;
+                container.appendChild(d);
+            }
+            shown += batch.length;
+
+            // Remove old load-more button if exists
+            const oldBtn = document.getElementById('asl-load-more');
+            if (oldBtn) oldBtn.remove();
+
+            if (shown < sorted.length) {
+                const btn = document.createElement('button');
+                btn.id = 'asl-load-more';
+                btn.className = 'asl-b';
+                btn.textContent = 'Load More (' + (sorted.length - shown) + ' remaining)';
+                btn.addEventListener('click', renderBatch);
+                container.appendChild(btn);
+            }
         }
+        renderBatch();
 
         // Switch to results tab
         const s = getSavedState();
