@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        7.3.2
+// @version        8.0.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -29,9 +29,101 @@
     //
 
     const STORAGE_KEY = 'asl_search_state';
-    const RESULTS_KEY = 'asl_search_results';
     const PROGRESS_KEY = 'asl_search_progress';
+    const DB_NAME = 'asl_search_db';
+    const DB_VERSION = 1;
+    const STORE_NAME = 'results';
 
+    // =====================
+    // IndexedDB STORAGE (replaces localStorage for results)
+    // =====================
+    function openDB() {
+        return new Promise((resolve, reject) => {
+            const req = indexedDB.open(DB_NAME, DB_VERSION);
+            req.onupgradeneeded = (e) => {
+                const db = e.target.result;
+                if (!db.objectStoreNames.contains(STORE_NAME)) {
+                    db.createObjectStore(STORE_NAME, { keyPath: 'nickname' });
+                }
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbGetAllResults() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readonly');
+            const store = tx.objectStore(STORE_NAME);
+            const req = store.getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbGetNicknames() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readonly');
+            const store = tx.objectStore(STORE_NAME);
+            const req = store.getAllKeys();
+            req.onsuccess = () => resolve(new Set(req.result || []));
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbPutResults(results) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            const store = tx.objectStore(STORE_NAME);
+            for (const r of results) {
+                store.put(r);
+            }
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async function dbClearResults() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            const store = tx.objectStore(STORE_NAME);
+            const req = store.clear();
+            req.onsuccess = () => resolve();
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbGetCount() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readonly');
+            const store = tx.objectStore(STORE_NAME);
+            const req = store.count();
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    // Migrate old localStorage results to IndexedDB (one-time)
+    async function migrateFromLocalStorage() {
+        try {
+            const old = localStorage.getItem('asl_search_results');
+            if (!old) return;
+            const results = JSON.parse(old);
+            if (results && results.length > 0) {
+                console.log('[ASL] Migrating', results.length, 'results from localStorage to IndexedDB...');
+                await dbPutResults(results);
+                localStorage.removeItem('asl_search_results');
+                console.log('[ASL] Migration complete.');
+            }
+        } catch(e) {
+            console.error('[ASL] Migration error:', e);
+        }
+    }
 
     // Gender codes used by FetLife
     const GENDERS = [
@@ -294,26 +386,6 @@
         localStorage.removeItem(STORAGE_KEY);
     }
 
-    function getSavedResults() {
-        try { return JSON.parse(localStorage.getItem(RESULTS_KEY)) || []; } catch(e) { return []; }
-    }
-
-    function saveResults(results) {
-        try {
-            localStorage.setItem(RESULTS_KEY, JSON.stringify(results));
-        } catch(e) {
-            // localStorage quota exceeded — strip avatar URLs to free space
-            console.warn('[ASL] localStorage full, stripping avatars to save space...');
-            for (const r of results) { r.avatar = ''; }
-            try {
-                localStorage.setItem(RESULTS_KEY, JSON.stringify(results));
-            } catch(e2) {
-                console.error('[ASL] localStorage still full after stripping avatars. Results may be lost.');
-                alert('Storage is full! Export your results to CSV before they are lost, then clear results to free space.');
-            }
-        }
-    }
-
     function getProgress() {
         try { return JSON.parse(localStorage.getItem(PROGRESS_KEY)) || { lastPageCrawled: 0, batchCount: 0 }; }
         catch(e) { return { lastPageCrawled: 0, batchCount: 0 }; }
@@ -323,8 +395,8 @@
         localStorage.setItem(PROGRESS_KEY, JSON.stringify(prog));
     }
 
-    function clearResults() {
-        localStorage.removeItem(RESULTS_KEY);
+    async function clearResults() {
+        await dbClearResults();
         localStorage.removeItem(PROGRESS_KEY);
         document.getElementById('asl-res').innerHTML = '';
         document.getElementById('asl-rcount').textContent = '';
@@ -432,7 +504,7 @@
         const pageNum = getCurrentPageNumber();
         console.log('[ASL] Scraping page', pageNum);
 
-        waitForCards(function(cards) {
+        waitForCards(async function(cards) {
             const profiles = [];
             for (const card of cards) {
                 const p = parseCard(card);
@@ -452,21 +524,20 @@
                 return;
             }
 
-            const results = getSavedResults();
-            const existing = new Set(results.map(r => r.nickname));
+            const existing = await dbGetNicknames();
             const params = s.params;
-            let newMatches = 0;
+            const newResults = [];
             for (const p of profiles) {
                 s.scanned++;
                 if (matchesFilter(p, params) && !existing.has(p.nickname)) {
                     p.batch = s.batch;
                     p.batchPages = s.startPage + '-' + s.endPage;
-                    results.push(p);
+                    newResults.push(p);
                     existing.add(p.nickname);
-                    newMatches++;
                 }
             }
-            saveResults(results);
+            if (newResults.length > 0) await dbPutResults(newResults);
+            const totalCount = await dbGetCount();
 
             s.currentPage = pageNum + 1;
             saveState(s);
@@ -474,8 +545,8 @@
             prog.lastPageCrawled = pageNum;
             saveProgress(prog);
 
-            updateCrawlBanner(s, results.length, pageNum);
-            console.log('[ASL] Page', pageNum, ':', newMatches, 'new matches.', results.length, 'total matches.', s.scanned, 'scanned.');
+            updateCrawlBanner(s, totalCount, pageNum);
+            console.log('[ASL] Page', pageNum, ':', newResults.length, 'new matches.', totalCount, 'total matches.', s.scanned, 'scanned.');
 
             if (pageNum >= s.endPage) {
                 s.active = false;
@@ -494,18 +565,17 @@
     }
 
     // Called when Phase 1 (page crawling) finishes
-    function onPhase1Complete(s) {
-        const results = getSavedResults();
+    async function onPhase1Complete(s) {
+        const totalCount = await dbGetCount();
         const activityDays = s.params ? s.params.activityDays : 0;
 
-        if (activityDays > 0 && results.length > 0) {
-            // Automatically start Phase 2
-            setStatus('Phase 1 done — ' + results.length + ' matches from ' + s.scanned + ' scanned. Starting activity check...');
-            loadAndDisplayResults();
+        if (activityDays > 0 && totalCount > 0) {
+            setStatus('Phase 1 done — ' + totalCount + ' matches from ' + s.scanned + ' scanned. Starting activity check...');
+            await loadAndDisplayResults();
             setTimeout(() => startActivityCheck(), 1500);
         } else {
-            setStatus('Done! ' + results.length + ' matches from ' + s.scanned + ' profiles scanned.');
-            loadAndDisplayResults();
+            setStatus('Done! ' + totalCount + ' matches from ' + s.scanned + ' profiles scanned.');
+            await loadAndDisplayResults();
         }
     }
 
@@ -539,13 +609,14 @@
     // =====================
     // CRAWL BANNER
     // =====================
-    function showCrawlBanner(s) {
+    async function showCrawlBanner(s) {
         removeCrawlBanner();
+        const count = await dbGetCount();
         const banner = document.createElement('div');
         banner.className = 'asl-crawl-banner';
         banner.id = 'asl-crawl-banner';
         banner.innerHTML = `
-            <span id="asl-banner-text">ASL Search ${s.batch || ''} — Page ${getCurrentPageNumber()} of ${s.startPage || '?'}-${s.endPage || '?'} — ${getSavedResults().length} matches so far...</span>
+            <span id="asl-banner-text">ASL Search ${s.batch || ''} — Page ${getCurrentPageNumber()} of ${s.startPage || '?'}-${s.endPage || '?'} — ${count} matches so far...</span>
             <button id="asl-banner-stop">Stop Search</button>
         `;
         document.body.prepend(banner);
@@ -564,8 +635,7 @@
         if (el) el.remove();
     }
 
-    function stopCrawl() {
-        // Clear pending navigation timer
+    async function stopCrawl() {
         if (window._aslNavTimer) { clearTimeout(window._aslNavTimer); window._aslNavTimer = null; }
         const s = getSavedState();
         if (s) {
@@ -577,7 +647,7 @@
         }
         removeCrawlBanner();
         console.log('[ASL] Search stopped by user.');
-        loadAndDisplayResults();
+        await loadAndDisplayResults();
     }
 
     // =====================
@@ -632,13 +702,12 @@
     }
 
     async function startActivityCheck() {
-        const results = getSavedResults();
+        const results = await dbGetAllResults();
         if (results.length === 0) {
             setStatus('No results to check activity for.');
             return;
         }
 
-        // Get the activity threshold from the dropdown
         const activityDays = parseInt(document.getElementById('asl-activity').value) || 90;
         if (activityDays === 0) {
             setStatus('Activity filter set to "Any" — nothing to check.');
@@ -648,20 +717,17 @@
         const cutoffDate = new Date();
         cutoffDate.setDate(cutoffDate.getDate() - activityDays);
 
-        // Find profiles that haven't been checked yet, limited by batch size
         const allUnchecked = results.filter(p => !p.activityChecked);
         if (allUnchecked.length === 0) {
             setStatus('All profiles already checked. Filtering...');
-            loadAndDisplayResults();
+            await loadAndDisplayResults();
             return;
         }
         const checkLimit = parseInt(document.getElementById('asl-check-limit').value) || 100;
-        // Take the LAST N unchecked (bottom of list = most recently added results)
         const unchecked = allUnchecked.slice(-checkLimit);
 
         activityCheckAbort = false;
 
-        // Show UI
         const progressEl = document.getElementById('asl-activity-progress');
         const checkBtn = document.getElementById('asl-check-activity');
         const stopBtn = document.getElementById('asl-stop-activity');
@@ -698,7 +764,6 @@
                 p.lastActivity = null;
                 p.activityError = result.error;
                 errors++;
-                // On rate limit (429) or server error, wait longer
                 if (result.error === 429 || result.error === 503) {
                     console.log('[ASL] Rate limited, waiting 30s...');
                     progressEl.innerHTML += '<br><span style="color:#cc6">Rate limited — waiting 30 seconds...</span>';
@@ -712,14 +777,13 @@
                     inactive++;
                 }
             } else {
-                p.lastActivity = null; // No activity section found
+                p.lastActivity = null;
                 inactive++;
             }
 
             // Save after each check so progress isn't lost
-            saveResults(results);
+            await dbPutResults([p]);
 
-            // Random delay between 3-8 seconds to look natural
             if (checked < total && !activityCheckAbort) {
                 const delay = randomDelay(3000, 8000);
                 console.log('[ASL] Next activity check in', Math.round(delay/1000), 'seconds');
@@ -727,7 +791,6 @@
             }
         }
 
-        // Done
         stopBtn.style.display = 'none';
         const remaining = allUnchecked.length - checked;
         const msg = activityCheckAbort
@@ -735,7 +798,7 @@
             : `Activity check complete! ${active} active, ${inactive} inactive out of ${total} checked.${remaining > 0 ? ' ' + remaining + ' still unchecked.' : ''}`;
         progressEl.innerHTML = `<strong>${msg}</strong>`;
         setStatus(msg);
-        loadAndDisplayResults();
+        await loadAndDisplayResults();
     }
 
     // =====================
@@ -860,8 +923,8 @@
     // =====================
     // DISPLAY RESULTS
     // =====================
-    function loadAndDisplayResults() {
-        const results = getSavedResults();
+    async function loadAndDisplayResults() {
+        const results = await dbGetAllResults();
         const container = document.getElementById('asl-res');
         if (!container) return;
 
@@ -978,8 +1041,8 @@
     // =====================
     // CSV EXPORT
     // =====================
-    function exportCSV() {
-        const results = getSavedResults();
+    async function exportCSV() {
+        const results = await dbGetAllResults();
         if (results.length === 0) { alert('No results'); return; }
         const hdr = ['Nickname','Age','Gender','Role','Location','Last Active','Profile URL'];
         const rows = results.map(p => {
@@ -1007,12 +1070,15 @@
     // INIT
     // =====================
     if (location.hostname === 'fetlife.com') {
-        buildUI();
+        (async function init() {
+            await migrateFromLocalStorage();
+            buildUI();
 
-        const isSearching = checkForOngoingSearch();
+            const isSearching = checkForOngoingSearch();
 
-        if (!isSearching) {
-            loadAndDisplayResults();
-        }
+            if (!isSearching) {
+                await loadAndDisplayResults();
+            }
+        })();
     }
 })();
