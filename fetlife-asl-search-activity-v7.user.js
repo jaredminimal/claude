@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.1.0
+// @version        8.2.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -33,8 +33,9 @@
     const STORAGE_KEY = 'asl_search_state';
     const PROGRESS_KEY = 'asl_search_progress';
     const DB_NAME = 'asl_search_db';
-    const DB_VERSION = 1;
+    const DB_VERSION = 2;
     const STORE_NAME = 'results';
+    const SEEN_STORE = 'seen';
 
     // =====================
     // IndexedDB STORAGE (replaces localStorage for results)
@@ -46,6 +47,9 @@
                 const db = e.target.result;
                 if (!db.objectStoreNames.contains(STORE_NAME)) {
                     db.createObjectStore(STORE_NAME, { keyPath: 'nickname' });
+                }
+                if (!db.objectStoreNames.contains(SEEN_STORE)) {
+                    db.createObjectStore(SEEN_STORE, { keyPath: 'nickname' });
                 }
             };
             req.onsuccess = () => resolve(req.result);
@@ -106,6 +110,53 @@
             const store = tx.objectStore(STORE_NAME);
             const req = store.count();
             req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    // Seen nicknames — for dedup across sessions
+    async function dbGetSeenNicknames() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(SEEN_STORE, 'readonly');
+            const store = tx.objectStore(SEEN_STORE);
+            const req = store.getAllKeys();
+            req.onsuccess = () => resolve(new Set(req.result || []));
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbAddSeenNicknames(nicknames) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(SEEN_STORE, 'readwrite');
+            const store = tx.objectStore(SEEN_STORE);
+            for (const n of nicknames) {
+                store.put({ nickname: n });
+            }
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async function dbGetSeenCount() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(SEEN_STORE, 'readonly');
+            const store = tx.objectStore(SEEN_STORE);
+            const req = store.count();
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbClearSeen() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(SEEN_STORE, 'readwrite');
+            const store = tx.objectStore(SEEN_STORE);
+            const req = store.clear();
+            req.onsuccess = () => resolve();
             req.onerror = () => reject(req.error);
         });
     }
@@ -225,6 +276,8 @@
         #asl-activity-progress{margin-top:8px;padding:8px 10px;background:#16213e;border-radius:6px;font-size:13px;color:#ccc;display:none;word-break:break-word}
         #asl-activity-progress .bar{height:4px;background:#333;border-radius:2px;margin-top:6px;overflow:hidden}
         #asl-activity-progress .bar .fill{height:100%;background:#c22;border-radius:2px;transition:width .3s}
+        #asl-import{background:#47a;color:#fff;margin-top:6px}#asl-import:hover{background:#58b}
+        #asl-seen-count{font-size:11px;color:#888;margin-top:4px}
         #asl-check-activity{background:#d80;color:#fff;margin-top:6px;display:none}#asl-check-activity:hover{background:#e91}
         #asl-stop-activity{background:#d93;color:#fff;margin-top:6px;display:none}
     `;
@@ -305,6 +358,9 @@
                     <button class="asl-b" id="asl-stop-activity">Stop Activity Check</button>
                     <div id="asl-activity-progress"></div>
                     <button class="asl-b" id="asl-csv">Export to CSV</button>
+                    <button class="asl-b" id="asl-import">Import CSV for Dedup</button>
+                    <input type="file" id="asl-import-file" accept=".csv" style="display:none">
+                    <div id="asl-seen-count"></div>
                     <button class="asl-b" id="asl-clear">Clear All Results</button>
                     <div id="asl-rcount"></div>
                     <div id="asl-res"></div>
@@ -338,6 +394,8 @@
 
         document.getElementById('asl-go').addEventListener('click', startNewSearch);
         document.getElementById('asl-csv').addEventListener('click', exportCSV);
+        document.getElementById('asl-import').addEventListener('click', () => document.getElementById('asl-import-file').click());
+        document.getElementById('asl-import-file').addEventListener('change', importCSVForDedup);
         document.getElementById('asl-clear').addEventListener('click', clearResults);
         document.getElementById('asl-check-activity').addEventListener('click', startActivityCheck);
         document.getElementById('asl-stop-activity').addEventListener('click', () => { activityCheckAbort = true; });
@@ -345,6 +403,7 @@
 
         // Load any existing results
         loadAndDisplayResults();
+        updateSeenCount();
     }
 
     function helpers(cgId, shId) {
@@ -528,18 +587,22 @@
             }
 
             const existing = await dbGetNicknames();
+            const seen = await dbGetSeenNicknames();
             const params = s.params;
             const newResults = [];
             for (const p of profiles) {
                 s.scanned++;
-                if (matchesFilter(p, params) && !existing.has(p.nickname)) {
+                if (matchesFilter(p, params) && !existing.has(p.nickname) && !seen.has(p.nickname)) {
                     p.batch = s.batch;
                     p.batchPages = s.startPage + '-' + s.endPage;
                     newResults.push(p);
                     existing.add(p.nickname);
                 }
             }
-            if (newResults.length > 0) await dbPutResults(newResults);
+            if (newResults.length > 0) {
+                await dbPutResults(newResults);
+                await dbAddSeenNicknames(newResults.map(r => r.nickname));
+            }
             const totalCount = await dbGetCount();
 
             s.currentPage = pageNum + 1;
@@ -1121,6 +1184,56 @@
         if (s && !s.active) {
             document.querySelector('#asl-tabs button[data-t="results"]')?.click();
         }
+    }
+
+    // =====================
+    // CSV IMPORT FOR DEDUP
+    // =====================
+    async function importCSVForDedup() {
+        const fileInput = document.getElementById('asl-import-file');
+        const file = fileInput.files[0];
+        if (!file) return;
+
+        try {
+            const text = await file.text();
+            const lines = text.split('\n');
+            const nicknames = [];
+
+            for (let i = 1; i < lines.length; i++) { // Skip header
+                const line = lines[i].trim();
+                if (!line) continue;
+                // Parse first CSV field (nickname) — handles quoted fields
+                let nickname;
+                if (line.startsWith('"')) {
+                    const end = line.indexOf('"', 1);
+                    nickname = line.substring(1, end);
+                } else {
+                    nickname = line.split(',')[0];
+                }
+                if (nickname) nicknames.push(nickname);
+            }
+
+            if (nicknames.length === 0) {
+                setStatus('No nicknames found in CSV.');
+                return;
+            }
+
+            await dbAddSeenNicknames(nicknames);
+            const totalSeen = await dbGetSeenCount();
+            setStatus('Imported ' + nicknames.length + ' nicknames for dedup. Total seen: ' + totalSeen);
+            updateSeenCount();
+        } catch(e) {
+            console.error('[ASL] CSV import error:', e);
+            setStatus('Error importing CSV: ' + e.message);
+        }
+        fileInput.value = ''; // Reset file input
+    }
+
+    async function updateSeenCount() {
+        const el = document.getElementById('asl-seen-count');
+        if (!el) return;
+        const count = await dbGetSeenCount();
+        el.textContent = count > 0 ? count + ' previously seen profiles (will be skipped)' : '';
     }
 
     // =====================
