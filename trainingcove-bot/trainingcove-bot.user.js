@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TrainingCove Course Bot
 // @namespace    trainingcove-bot
-// @version      3.6
+// @version      4.0
 // @description  Auto-navigates TrainingCove course, answers questions via local Claude API server
 // @match        https://www.trainingcove.com/Members/Courses/go.aspx*
 // @match        https://trainingcove.com/Members/Courses/go.aspx*
@@ -176,11 +176,21 @@
     // If we just answered a question on the previous page load, check if correct or incorrect
     if (GM_getValue("tcbot_just_answered", false)) {
       GM_setValue("tcbot_just_answered", false);
-      // If page says "Incorrect", don't advance - let it re-detect the question
+      const lastQ = GM_getValue("tcbot_last_question", "");
+      const lastA = GM_getValue("tcbot_last_answer_idx", -1);
+
       if (lowerText.includes("incorrect")) {
+        // Report wrong answer to server for caching
+        if (lastQ && lastA >= 0) {
+          reportWrong(lastQ, lastA);
+          logMsg(`Reported wrong answer: ${lastA}`);
+        }
         // Fall through to re-detect the question and try again
       } else {
-        // Correct or no feedback - click Next to advance
+        // Correct or no feedback - report correct and click Next
+        if (lastQ && lastA >= 0) {
+          reportCorrect(lastQ, lastA);
+        }
         const forwardArrow = findForwardArrow();
         if (forwardArrow) {
           return { type: "CONTENT_SLIDE", el: forwardArrow };
@@ -395,6 +405,30 @@
 
   // ── Claude API Communication ───────────────────────────────────────
 
+  function markAnswered(question, answerIndex) {
+    GM_setValue("tcbot_just_answered", true);
+    GM_setValue("tcbot_last_question", question);
+    GM_setValue("tcbot_last_answer_idx", answerIndex);
+  }
+
+  function reportCorrect(question, answerIndex) {
+    GM_xmlhttpRequest({
+      method: "POST",
+      url: `${CONFIG.SERVER_URL}/correct`,
+      headers: { "Content-Type": "application/json" },
+      data: JSON.stringify({ question, answerIndex }),
+    });
+  }
+
+  function reportWrong(question, answerIndex) {
+    GM_xmlhttpRequest({
+      method: "POST",
+      url: `${CONFIG.SERVER_URL}/wrong`,
+      headers: { "Content-Type": "application/json" },
+      data: JSON.stringify({ question, answerIndex }),
+    });
+  }
+
   function askClaude(question, options) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
@@ -466,15 +500,13 @@
     if (bodyText.includes("incorrect")) {
       const lastAnswer = GM_getValue("tcbot_last_tf_answer", -1);
       if (lastAnswer === 0) {
-        // We tried True, it was wrong - pick False
         logMsg("Incorrect - switching to False");
-        GM_setValue("tcbot_just_answered", true);
+        markAnswered(question, 1);
         GM_setValue("tcbot_last_tf_answer", 1);
         pageState.falseBtn.click();
       } else {
-        // We tried False (or unknown), it was wrong - pick True
         logMsg("Incorrect - switching to True");
-        GM_setValue("tcbot_just_answered", true);
+        markAnswered(question, 0);
         GM_setValue("tcbot_last_tf_answer", 0);
         pageState.trueBtn.click();
       }
@@ -491,7 +523,7 @@
       logMsg(`Claude says: ${answerIdx === 0 ? "True" : "False"}`);
       stats.questions++;
       updateStats();
-      GM_setValue("tcbot_just_answered", true);
+      markAnswered(question, answerIdx);
       GM_setValue("tcbot_last_tf_answer", answerIdx);
       btn.click();
     } catch (err) {
@@ -499,7 +531,7 @@
       logMsg(`ERROR: ${err.message}`);
       stats.errors++;
       updateStats();
-      GM_setValue("tcbot_just_answered", true);
+      markAnswered(question, 0);
       GM_setValue("tcbot_last_tf_answer", 0);
       pageState.trueBtn.click();
     }
@@ -538,7 +570,7 @@
     // If only 1 option left, just pick it
     if (availableOptions.length === 1) {
       logMsg(`Only one option left: ${availableOptions[0]}`);
-      GM_setValue("tcbot_just_answered", true);
+      markAnswered(question, availableIdxs[0]);
       triedAnswers.push(availableIdxs[0]);
       GM_setValue("tcbot_mc_tried_" + questionKey, triedAnswers);
       pageState.buttons[availableIdxs[0]].click();
@@ -553,7 +585,7 @@
       logMsg(`Claude says: ${options[actualIdx]}`);
       stats.questions++;
       updateStats();
-      GM_setValue("tcbot_just_answered", true);
+      markAnswered(question, actualIdx);
       triedAnswers.push(actualIdx);
       GM_setValue("tcbot_mc_tried_" + questionKey, triedAnswers);
       pageState.buttons[actualIdx].click();
@@ -562,7 +594,7 @@
       logMsg(`ERROR: ${err.message}`);
       stats.errors++;
       updateStats();
-      GM_setValue("tcbot_just_answered", true);
+      markAnswered(question, availableIdxs[0]);
       triedAnswers.push(availableIdxs[0]);
       GM_setValue("tcbot_mc_tried_" + questionKey, triedAnswers);
       pageState.buttons[availableIdxs[0]].click();
