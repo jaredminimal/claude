@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TrainingCove Course Bot
 // @namespace    trainingcove-bot
-// @version      4.1
+// @version      4.2
 // @description  Auto-navigates TrainingCove course, answers questions via local Claude API server
 // @match        https://www.trainingcove.com/Members/Courses/go.aspx*
 // @match        https://trainingcove.com/Members/Courses/go.aspx*
@@ -134,6 +134,15 @@
     // "Correct! - Click To Proceed"
     const correctBtn = findButtonByText("Correct!");
     if (correctBtn) return { type: "QUIZ_CORRECT", el: correctBtn };
+
+    // "Incorrect - Click To Proceed"
+    const incorrectBtn = findButtonByText("Incorrect");
+    if (incorrectBtn) {
+      // Parse "The correct answer was: X" to cache the right answer
+      const correctMatch = bodyText.match(/The correct answer was:\s*(.+)/i);
+      const correctAnswerText = correctMatch ? correctMatch[1].trim() : "";
+      return { type: "QUIZ_INCORRECT", el: incorrectBtn, correctAnswerText };
+    }
 
     // Radio buttons = active quiz question
     const radios = document.querySelectorAll('input[type="radio"]');
@@ -745,6 +754,40 @@
     pageState.el.click();
   }
 
+  async function handleQuizIncorrect(pageState) {
+    const lastQ = GM_getValue("tcbot_quiz_last_question", "");
+    const lastA = GM_getValue("tcbot_quiz_last_answer", -1);
+
+    // Report the wrong answer
+    if (lastQ && lastA >= 0) {
+      reportWrong(lastQ, lastA);
+      logMsg(`Cached wrong quiz answer: ${lastA}`);
+    }
+
+    // Parse and cache the CORRECT answer from "The correct answer was: X"
+    if (lastQ && pageState.correctAnswerText) {
+      // Find which option index matches the correct answer text
+      // We need to look at the radio labels on the page
+      const radios = document.querySelectorAll('input[type="radio"]');
+      const options = extractOptions(radios);
+      const correctIdx = options.findIndex(opt =>
+        opt.toLowerCase().includes(pageState.correctAnswerText.toLowerCase()) ||
+        pageState.correctAnswerText.toLowerCase().includes(opt.toLowerCase())
+      );
+      if (correctIdx >= 0) {
+        reportCorrect(lastQ, correctIdx);
+        logMsg(`Cached CORRECT answer from feedback: ${correctIdx} (${options[correctIdx]})`);
+      }
+    }
+
+    setStatus("Incorrect - proceeding...");
+    logMsg("Wrong answer - clicking to proceed");
+    stats.errors++;
+    updateStats();
+    await sleep(CONFIG.QUESTION_DELAY);
+    pageState.el.click();
+  }
+
   async function handleQuizPassed(pageState) {
     setStatus("Quiz passed!");
     logMsg("Quiz PASSED - proceeding");
@@ -811,6 +854,9 @@
           break;
         case "QUIZ_CORRECT":
           await handleQuizCorrect(pageState);
+          break;
+        case "QUIZ_INCORRECT":
+          await handleQuizIncorrect(pageState);
           break;
         case "QUIZ_PASSED":
           await handleQuizPassed(pageState);
