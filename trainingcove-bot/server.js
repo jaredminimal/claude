@@ -99,7 +99,14 @@ const server = http.createServer(async (req, res) => {
         });
 
         const answerText = response.content[0].text.trim();
-        const answerIndex = parseInt(answerText, 10);
+        // Extract first number from response (handles "0", "The answer is 0", etc.)
+        const numMatch = answerText.match(/\d+/);
+        let answerIndex = numMatch ? parseInt(numMatch[0], 10) : 0;
+        // Validate index is in range
+        if (isNaN(answerIndex) || answerIndex < 0 || answerIndex >= options.length) {
+          console.log(`   WARNING: Invalid answer "${answerText}", defaulting to 0`);
+          answerIndex = 0;
+        }
 
         console.log(`Q: ${question.substring(0, 80)}...`);
         console.log(`   Options: ${options.join(" | ")}`);
