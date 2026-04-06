@@ -4,8 +4,22 @@ const Anthropic = require("@anthropic-ai/sdk").default;
 const PORT = 3847;
 const anthropic = new Anthropic(); // uses ANTHROPIC_API_KEY env var
 
-const SYSTEM_PROMPT = `You are answering multiple-choice questions from an Arizona real estate training course (TrainingCove).
-Pick the single best answer. Respond with ONLY the zero-based index number of the correct option (0, 1, 2, or 3).
+const SYSTEM_PROMPT = `You are an expert on Arizona real estate law, fair housing, water rights, fire safety, deed fraud, landlord-tenant law, agency law, contracts, ethics, and all topics covered in Arizona Department of Real Estate continuing education courses.
+
+You are answering multiple-choice questions from Arizona real estate training courses on TrainingCove. These cover topics including but not limited to:
+- Fair Housing Act, protected classes, discrimination, HUD testing
+- Arizona water resources, groundwater, CAP, ADWR
+- Wildfire prevention, defensible space, Firewise USA
+- Deed fraud prevention, title protection, recording
+- Landlord-tenant law, leases, evictions, property management
+- Agency relationships (express, implied, ostensible)
+- Real estate ethics and Code of Ethics
+- Disability accommodations, ESAs, ADA
+- Equal Credit Opportunity Act, lending discrimination
+
+Think carefully about each question. Consider all options before answering.
+For True/False questions, remember that implied agency CAN exist without a formal written agreement.
+Respond with ONLY the zero-based index number of the correct option (0, 1, 2, 3, etc.).
 Do not include any other text, explanation, or punctuation. Just the number.`;
 
 const server = http.createServer(async (req, res) => {

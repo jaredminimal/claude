@@ -1,12 +1,16 @@
 // ==UserScript==
 // @name         TrainingCove Course Bot
 // @namespace    trainingcove-bot
-// @version      3.5
+// @version      3.6
 // @description  Auto-navigates TrainingCove course, answers questions via local Claude API server
 // @match        https://www.trainingcove.com/Members/Courses/go.aspx*
 // @match        https://trainingcove.com/Members/Courses/go.aspx*
 // @match        https://www.trainingcove.com/Members/Quiz.aspx*
 // @match        https://trainingcove.com/Members/Quiz.aspx*
+// @match        https://www.trainingcove.com/Members/Failed.aspx*
+// @match        https://trainingcove.com/Members/Failed.aspx*
+// @match        https://www.trainingcove.com/Members/Passed.aspx*
+// @match        https://trainingcove.com/Members/Passed.aspx*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -98,6 +102,20 @@
   function getPageType() {
     const url = window.location.href;
     const bodyText = document.body.innerText || "";
+
+    // ─── Failed exam page ───
+    if (url.includes("Failed.aspx")) {
+      const retakeBtn = findButtonByText("Take the Exam Again");
+      if (retakeBtn) return { type: "EXAM_FAILED", el: retakeBtn };
+      return { type: "UNKNOWN" };
+    }
+
+    // ─── Passed exam page ───
+    if (url.includes("Passed.aspx")) {
+      const continueBtn = findButtonByText("Continue") || findButtonByText("Proceed") || findButtonByText("Next");
+      if (continueBtn) return { type: "EXAM_PASSED", el: continueBtn };
+      return { type: "UNKNOWN" };
+    }
 
     // ─── Quiz pages (Quiz.aspx) ───
     if (url.includes("Quiz.aspx")) {
@@ -749,6 +767,18 @@
           break;
         case "QUIZ_RESULT_SCREEN":
           await handleQuizResultScreen(pageState);
+          break;
+        case "EXAM_FAILED":
+          setStatus("Exam failed - retaking...");
+          logMsg("Exam failed, clicking Take the Exam Again");
+          await sleep(3000);
+          pageState.el.click();
+          break;
+        case "EXAM_PASSED":
+          setStatus("Exam passed!");
+          logMsg("Exam PASSED!");
+          await sleep(3000);
+          if (pageState.el) pageState.el.click();
           break;
         case "UNKNOWN":
           setStatus("Unknown page - waiting...");
