@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TrainingCove Course Bot
 // @namespace    trainingcove-bot
-// @version      3.4
+// @version      3.5
 // @description  Auto-navigates TrainingCove course, answers questions via local Claude API server
 // @match        https://www.trainingcove.com/Members/Courses/go.aspx*
 // @match        https://trainingcove.com/Members/Courses/go.aspx*
@@ -227,8 +227,8 @@
       }
     }
 
-    // Check for multiple-choice answer buttons
-    const mcButtons = document.querySelectorAll('input.MultChoiceButton');
+    // Check for multiple-choice answer buttons (includes Definition Matching)
+    const mcButtons = document.querySelectorAll('input.MultChoiceButton, input.DefinitionButton');
     if (mcButtons.length > 1) {
       return {
         type: "MULTIPLE_CHOICE_QUESTION",
