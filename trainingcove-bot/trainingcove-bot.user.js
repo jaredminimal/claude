@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TrainingCove Course Bot
 // @namespace    trainingcove-bot
-// @version      4.0
+// @version      4.1
 // @description  Auto-navigates TrainingCove course, answers questions via local Claude API server
 // @match        https://www.trainingcove.com/Members/Courses/go.aspx*
 // @match        https://trainingcove.com/Members/Courses/go.aspx*
@@ -161,7 +161,17 @@
 
     // Generic proceed/go-back screen
     if (proceedBtn && !goBackBtn) return { type: "QUIZ_CORRECT", el: proceedBtn };
-    if (proceedBtn && goBackBtn) return { type: "QUIZ_RESULT_SCREEN", proceedBtn, goBackBtn };
+    if (proceedBtn && goBackBtn) {
+      // This means the previous answer was wrong - cache it
+      const lastQ = GM_getValue("tcbot_quiz_last_question", "");
+      const lastA = GM_getValue("tcbot_quiz_last_answer", -1);
+      if (lastQ && lastA >= 0) {
+        reportWrong(lastQ, lastA);
+        logMsg(`Cached wrong quiz answer: ${lastA}`);
+        GM_setValue("tcbot_quiz_last_question", "");
+      }
+      return { type: "QUIZ_RESULT_SCREEN", proceedBtn, goBackBtn };
+    }
 
     return { type: "UNKNOWN" };
   }
@@ -697,6 +707,10 @@
       stats.questions++;
       updateStats();
 
+      // Save what we answered so we can cache correct/wrong after feedback
+      GM_setValue("tcbot_quiz_last_question", question);
+      GM_setValue("tcbot_quiz_last_answer", answerIdx);
+
       await sleep(2000);
 
       const btn =
@@ -718,6 +732,13 @@
   }
 
   async function handleQuizCorrect(pageState) {
+    // Cache the correct answer
+    const lastQ = GM_getValue("tcbot_quiz_last_question", "");
+    const lastA = GM_getValue("tcbot_quiz_last_answer", -1);
+    if (lastQ && lastA >= 0) {
+      reportCorrect(lastQ, lastA);
+      logMsg(`Cached correct quiz answer: ${lastA}`);
+    }
     setStatus("Correct! Proceeding...");
     logMsg("Correct answer - proceeding");
     await sleep(CONFIG.QUESTION_DELAY);
