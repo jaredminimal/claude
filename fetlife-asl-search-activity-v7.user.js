@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.2.6
+// @version        8.2.7
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -1048,9 +1048,11 @@
         const activityDays = parseInt(document.getElementById('asl-activity').value) || 0;
 
         // Filter by activity if threshold is set and checks have been done
+        // Skip activity filter when sorting by "Recently checked" — show all checked profiles
+        const sortMode = (document.getElementById('asl-sort') || {}).value || 'newest';
         let displayResults = results;
         let filteredCount = 0;
-        if (activityDays > 0) {
+        if (activityDays > 0 && sortMode !== 'checked') {
             const cutoff = new Date();
             cutoff.setDate(cutoff.getDate() - activityDays);
             displayResults = results.filter(p => {
@@ -1092,7 +1094,6 @@
         }
 
         // Sort results
-        const sortMode = (document.getElementById('asl-sort') || {}).value || 'newest';
         let sorted = [...displayResults];
         if (sortMode === 'newest') {
             sorted.sort((a, b) => {
