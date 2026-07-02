@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.2.8
+// @version        8.3.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -343,10 +343,10 @@
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Sort by</label>
                         <select id="asl-sort" style="width:auto;margin:0">
+                            <option value="activity" selected>Last active</option>
                             <option value="newest">Newest first</option>
                             <option value="age-asc">Age (youngest)</option>
                             <option value="age-desc">Age (oldest)</option>
-                            <option value="activity">Last active</option>
                             <option value="checked">Recently checked</option>
                         </select>
                     </div>
@@ -902,6 +902,9 @@
             : `Activity check complete! ${active} active, ${inactive} inactive out of ${total} checked.${remaining > 0 ? ' ' + remaining + ' still unchecked.' : ''}`;
         progressEl.innerHTML = `<strong>${msg}</strong>`;
         setStatus(msg);
+        // Switch to "Last active" sort so most recently active profiles show first
+        const sortEl = document.getElementById('asl-sort');
+        if (sortEl) sortEl.value = 'activity';
         await loadAndDisplayResults();
     }
 
@@ -1049,7 +1052,7 @@
 
         // Filter by activity if threshold is set and checks have been done
         // Skip activity filter when sorting by "Recently checked" — show all checked profiles
-        const sortMode = (document.getElementById('asl-sort') || {}).value || 'newest';
+        const sortMode = (document.getElementById('asl-sort') || {}).value || 'activity';
         let displayResults = results;
         let filteredCount = 0;
         if (activityDays > 0) {
