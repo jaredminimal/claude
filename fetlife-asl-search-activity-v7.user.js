@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.2.3
+// @version        8.2.4
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -332,8 +332,8 @@
                         <option value="365">Last year</option>
                     </select>
                     <div class="sec">Step 4: Speed &amp; Limits</div>
-                    <label class="fl">Delay between pages: <span id="asl-dl">3</span>s</label>
-                    <input type="range" id="asl-spd" min="3" max="20" value="3" step="1">
+                    <label class="fl">Delay between pages: <span id="asl-dl">1.5</span>s</label>
+                    <input type="range" id="asl-spd" min="1" max="20" value="1.5" step="0.5">
                     <label class="fl">Pages to search</label>
                     <input type="number" id="asl-mp" min="1" max="2000" value="100">
                     <button class="asl-b" id="asl-go">Start Search</button>
@@ -506,7 +506,7 @@
             roleFilterEnabled: document.getElementById('asl-role-toggle').checked,
             roles: [...document.querySelectorAll('#asl-r input:checked')].map(c => c.value),
             locFilter: document.getElementById('asl-loc').value.trim().toLowerCase(),
-            delay: (parseInt(document.getElementById('asl-spd').value) || 3) * 1000,
+            delay: (parseFloat(document.getElementById('asl-spd').value) || 1.5) * 1000,
             activityDays: parseInt(document.getElementById('asl-activity').value) || 0,
         };
 
