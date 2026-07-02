@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.3.1
+// @version        8.3.2
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -218,6 +218,7 @@
 
     // Phase 2 state
     let activityCheckAbort = false;
+    let lastCheckBatchTime = parseInt(localStorage.getItem('asl_last_check_batch') || '0');
 
     // =====================
     // STYLES
@@ -830,6 +831,8 @@
         const unchecked = allUnchecked.slice(-checkLimit);
 
         activityCheckAbort = false;
+        lastCheckBatchTime = Date.now();
+        localStorage.setItem('asl_last_check_batch', String(lastCheckBatchTime));
 
         const progressEl = document.getElementById('asl-activity-progress');
         const checkBtn = document.getElementById('asl-check-activity');
@@ -1050,16 +1053,18 @@
         const countEl = document.getElementById('asl-rcount');
         const activityDays = parseInt(document.getElementById('asl-activity').value) || 0;
 
-        // Filter by activity if threshold is set and checks have been done
-        // Skip activity filter when sorting by "Recently checked" — show all checked profiles
         const sortMode = (document.getElementById('asl-sort') || {}).value || 'activity';
         let displayResults = results;
         let filteredCount = 0;
-        if (activityDays > 0) {
+
+        if (sortMode === 'checked') {
+            // "Recently checked" — show only profiles from the last activity check batch
+            displayResults = results.filter(p => p.checkedAt && p.checkedAt >= lastCheckBatchTime);
+        } else if (activityDays > 0) {
             const cutoff = new Date();
             cutoff.setDate(cutoff.getDate() - activityDays);
             displayResults = results.filter(p => {
-                if (!p.activityChecked) return true; // Show unchecked profiles
+                if (!p.activityChecked) return true;
                 if (!p.lastActivity) { filteredCount++; return false; }
                 const d = new Date(p.lastActivity);
                 if (d >= cutoff) return true;
