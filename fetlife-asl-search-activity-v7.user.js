@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.3.6
+// @version        8.4.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -359,6 +359,12 @@
                         <label class="fl" style="margin:0;white-space:nowrap">unchecked</label>
                     </div>
                     <button class="asl-b" id="asl-check-activity">Check Activity Now</button>
+                    <div class="sec">Re-check Activity by Age</div>
+                    <div class="row">
+                        <div><label class="fl">Min Age</label><input type="number" id="asl-recheck-amin" min="18" max="200" value="18" style="margin-bottom:4px"></div>
+                        <div><label class="fl">Max Age</label><input type="number" id="asl-recheck-amax" min="18" max="200" value="99" style="margin-bottom:4px"></div>
+                    </div>
+                    <button class="asl-b" id="asl-recheck" style="background:#d80;color:#fff;margin-top:0">Re-check Activity</button>
                     <button class="asl-b" id="asl-stop-activity">Stop Activity Check</button>
                     <div id="asl-activity-progress"></div>
                     <button class="asl-b" id="asl-csv">Export to CSV</button>
@@ -402,6 +408,7 @@
         document.getElementById('asl-import-file').addEventListener('change', importCSVForDedup);
         document.getElementById('asl-clear').addEventListener('click', clearResults);
         document.getElementById('asl-check-activity').addEventListener('click', startActivityCheck);
+        document.getElementById('asl-recheck').addEventListener('click', recheckByAge);
         document.getElementById('asl-stop-activity').addEventListener('click', () => { activityCheckAbort = true; });
         document.getElementById('asl-sort').addEventListener('change', loadAndDisplayResults);
 
@@ -807,6 +814,44 @@
         return { date: null, error: null };
     }
 
+    async function fetchFreshAvatar(profileUrl) {
+        try {
+            const resp = await gmFetch(profileUrl, { 'Accept': 'text/html' });
+            if (!resp.ok) return null;
+            const html = resp.responseText;
+            // Look for og:image meta tag — most reliable source for avatar
+            const ogMatch = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/);
+            if (ogMatch && ogMatch[1]) return ogMatch[1];
+            // Fallback: look for avatar img
+            const imgMatch = html.match(/<img[^>]+class="[^"]*ipp[^"]*"[^>]+src="([^"]+)"/);
+            if (imgMatch && imgMatch[1]) return imgMatch[1];
+            return null;
+        } catch(e) {
+            return null;
+        }
+    }
+
+    async function recheckByAge() {
+        const minAge = parseInt(document.getElementById('asl-recheck-amin').value) || 18;
+        const maxAge = parseInt(document.getElementById('asl-recheck-amax').value) || 99;
+        const results = await dbGetAllResults();
+        const toReset = results.filter(p => p.activityChecked && p.age >= minAge && p.age <= maxAge);
+
+        if (toReset.length === 0) {
+            setStatus('No checked profiles found in age range ' + minAge + '-' + maxAge);
+            return;
+        }
+
+        for (const p of toReset) {
+            p.activityChecked = false;
+            p.checkedAt = null;
+        }
+        await dbPutResults(toReset);
+        setStatus('Reset ' + toReset.length + ' profiles (age ' + minAge + '-' + maxAge + '). Starting activity re-check...');
+        await loadAndDisplayResults();
+        setTimeout(() => startActivityCheck(), 500);
+    }
+
     async function startActivityCheck() {
         const results = await dbGetAllResults();
         if (results.length === 0) {
@@ -865,8 +910,13 @@
                 <div class="bar"><div class="fill" style="width:${Math.round(checked/total*100)}%"></div></div>
             `;
 
-            const result = await fetchActivityDate(p.url);
+            // Fetch activity and fresh avatar in parallel
+            const [result, avatarResult] = await Promise.all([
+                fetchActivityDate(p.url),
+                fetchFreshAvatar(p.url)
+            ]);
 
+            if (avatarResult) p.avatar = avatarResult;
             p.activityChecked = true;
             p.checkedAt = Date.now();
             if (result.error) {
