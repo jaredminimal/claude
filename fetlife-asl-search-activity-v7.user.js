@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.3.5
+// @version        8.3.6
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -338,7 +338,7 @@
                     <label class="fl">Delay between pages: <span id="asl-dl">1.5</span>s</label>
                     <input type="range" id="asl-spd" min="1" max="20" value="1.5" step="0.5">
                     <label class="fl">Pages to search</label>
-                    <input type="number" id="asl-mp" min="1" max="2000" value="100">
+                    <input type="number" id="asl-mp" min="1" max="5000" value="500">
                     <button class="asl-b" id="asl-go">Start Search</button>
                     <div id="asl-status"></div>
                 </div>
@@ -355,7 +355,7 @@
                     </div>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Check last</label>
-                        <input type="number" id="asl-check-limit" min="1" max="9999" value="2000" style="width:70px;margin:0">
+                        <input type="number" id="asl-check-limit" min="1" max="9999" value="5000" style="width:70px;margin:0">
                         <label class="fl" style="margin:0;white-space:nowrap">unchecked</label>
                     </div>
                     <button class="asl-b" id="asl-check-activity">Check Activity Now</button>
@@ -502,7 +502,7 @@
             return;
         }
 
-        const pagesToSearch = parseInt(document.getElementById('asl-mp').value) || 100;
+        const pagesToSearch = parseInt(document.getElementById('asl-mp').value) || 500;
         const params = {
             ageMin: parseInt(document.getElementById('asl-amin').value) || 18,
             ageMax: parseInt(document.getElementById('asl-amax').value) || 200,
