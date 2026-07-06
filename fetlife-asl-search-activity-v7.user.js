@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.7.6
+// @version        8.8.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -91,6 +91,16 @@
             for (const r of results) {
                 store.put(r);
             }
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async function dbDelete(nickname) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            tx.objectStore(STORE_NAME).delete(nickname);
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
@@ -836,6 +846,7 @@
                         ok: resp.status >= 200 && resp.status < 300,
                         status: resp.status,
                         responseText: resp.responseText,
+                        finalUrl: resp.finalUrl || url,
                     });
                 },
                 onerror: function(err) {
@@ -870,14 +881,22 @@
         return out;
     };
 
+    // Derive the current nickname from a (possibly redirected) URL
+    function nicknameFromUrl(url) {
+        if (!url) return null;
+        const m = url.replace(/[?#].*$/, '').replace(/\/activity\/?$/, '').match(/fetlife\.com\/([^\/]+)/i);
+        return m ? m[1] : null;
+    }
+
     async function fetchActivityDate(profileUrl) {
         try {
             const activityUrl = profileUrl.replace(/\/?$/, '/activity');
             const resp = await gmFetch(activityUrl, { 'Accept': 'application/json' });
+            const canonical = nicknameFromUrl(resp.finalUrl);
 
             if (!resp.ok) {
                 console.log('[ASL] Activity fetch failed:', resp.status, profileUrl);
-                return { date: null, error: resp.status };
+                return { date: null, error: resp.status, canonical };
             }
 
             let data;
@@ -900,7 +919,7 @@
                     }
                 }
             }
-            return { date: latest, error: null };
+            return { date: latest, error: null, canonical };
         } catch (e) {
             console.error('[ASL] Activity fetch error:', e, profileUrl);
             return { date: null, error: e.message };
@@ -977,26 +996,29 @@
             const nickname = profileUrl.replace(/\/+$/, '').split('/').pop();
             const activityUrl = profileUrl.replace(/\/?$/, '/activity');
             const resp = await gmFetch(activityUrl, { 'Accept': 'application/json' });
-            if (!resp.ok || !resp.responseText) return null;
+            // Detect username changes via the redirected URL
+            const canonical = nicknameFromUrl(resp.finalUrl) || nickname;
+            if (!resp.ok || !resp.responseText) return { avatar: null, canonical };
 
             let data;
             try { data = JSON.parse(resp.responseText); } catch(e) {
                 console.log('[ASL] Activity JSON parse failed for', nickname);
-                return null;
+                return { avatar: null, canonical };
             }
 
-            const url = findAvatarForNickname(data, nickname, 0);
+            // Match by canonical nickname (handles renames)
+            const url = findAvatarForNickname(data, canonical, 0);
             if (!url) {
-                console.log('[ASL] No avatar matched to nickname', nickname, '— leaving existing pic');
-                return null;
+                console.log('[ASL] No avatar matched to', canonical, '— leaving existing pic');
+                return { avatar: null, canonical };
             }
             const cleanUrl = url.replace(/\\\//g, '/');
-            console.log('[ASL] Matched avatar for', nickname, ':', cleanUrl.substring(0, 60));
+            console.log('[ASL] Matched avatar for', canonical, ':', cleanUrl.substring(0, 60));
             const b64 = await fetchImageAsBase64(cleanUrl);
-            return b64 || cleanUrl;
+            return { avatar: b64 || cleanUrl, canonical };
         } catch(e) {
             console.error('[ASL] fetchFreshAvatar error:', e);
-            return null;
+            return { avatar: null, canonical: null };
         }
     }
 
@@ -1040,6 +1062,7 @@
         const activeSort = (document.getElementById('asl-active-sort') || {}).value || 'activity';
         active = sortProfiles(active, activeSort);
         const toReset = active.slice(from - 1, to);
+        console.log('[ASL] Re-check range #' + from + '-' + to + ' (sort=' + activeSort + ', skipPics=' + skipWithPics + '):', toReset.map(p => p.nickname));
 
         if (toReset.length === 0) {
             setStatus('No active profiles in range ' + from + '-' + to + ' (only ' + active.length + ' active' + (skipWithPics ? ' without a pic' : '') + ').');
@@ -1117,18 +1140,29 @@
                 <div class="bar"><div class="fill" style="width:${Math.round(checked/total*100)}%"></div></div>
             `;
 
-            let result, freshAvatar;
+            let result, avatarInfo;
             if (refreshAvatars) {
-                [result, freshAvatar] = await Promise.all([
+                [result, avatarInfo] = await Promise.all([
                     fetchActivityDate(p.url),
                     fetchFreshAvatar(p.url)
                 ]);
                 // Deliberate refresh: set the verified avatar, or clear it so a
                 // wrong/old pic becomes "?" instead of persisting.
-                p.avatar = freshAvatar || '';
+                p.avatar = (avatarInfo && avatarInfo.avatar) || '';
             } else {
                 result = await fetchActivityDate(p.url);
             }
+
+            // Handle username changes: if the profile redirected to a new
+            // nickname, migrate the record to the new key.
+            const canonical = (result && result.canonical) || (avatarInfo && avatarInfo.canonical);
+            if (canonical && canonical.toLowerCase() !== p.nickname.toLowerCase()) {
+                console.log('[ASL] Username change:', p.nickname, '→', canonical);
+                await dbDelete(p.nickname);
+                p.nickname = canonical;
+                p.url = 'https://fetlife.com/' + canonical;
+            }
+
             p.activityChecked = true;
             p.checkedAt = Date.now();
             if (result.error) {
