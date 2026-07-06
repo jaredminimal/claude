@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.7.5
+// @version        8.7.6
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -9,6 +9,7 @@
 // @updateURL      https://raw.githubusercontent.com/jaredminimal/claude/claude/fix-fetlife-rate-limit-uD4Gn/fetlife-asl-search-activity-v7.user.js
 // @downloadURL    https://raw.githubusercontent.com/jaredminimal/claude/claude/fix-fetlife-rate-limit-uD4Gn/fetlife-asl-search-activity-v7.user.js
 // @grant          GM_xmlhttpRequest
+// @grant          unsafeWindow
 // @connect        fetlife.com
 // @connect        *.fetlife.com
 // ==/UserScript==
@@ -847,7 +848,8 @@
     // Debug helper: run aslDebugActivity('nickname') in the console to inspect
     // BOTH the profile page and the activity feed, so we can see where the
     // avatar and any "last active" field actually live.
-    window.aslDebugActivity = async function(nickname) {
+    const dbgTarget = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+    dbgTarget.aslDebugActivity = async function(nickname) {
         const out = {};
         // 1) Profile page HTML
         const prof = await gmFetch('https://fetlife.com/' + nickname, { 'Accept': 'text/html' });
