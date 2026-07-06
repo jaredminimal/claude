@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.5.3
+// @version        8.5.4
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -876,10 +876,13 @@
             if (resp.ok && resp.responseText) {
                 const cdnMatch = resp.responseText.match(/https:\\?\/\\?\/pic[a-z0-9-]*\.cdn\.fetlife\.com[^"'\\ ]+/i);
                 if (cdnMatch) {
-                    // Un-escape any JSON-escaped slashes; return the fresh URL directly
-                    // (fresh signed URLs render reliably; base64 may be blocked by page CSP)
+                    // Un-escape any JSON-escaped slashes, then convert to permanent
+                    // base64 (confirmed: data: URIs render fine on FetLife's page)
                     const cleanUrl = cdnMatch[0].replace(/\\\//g, '/');
                     console.log('[ASL] Found fresh avatar URL in activity JSON:', cleanUrl.substring(0, 60));
+                    const b64 = await fetchImageAsBase64(cleanUrl);
+                    if (b64) return b64;
+                    // If base64 conversion failed, fall back to the fresh URL
                     return cleanUrl;
                 }
                 console.log('[ASL] No CDN avatar URL found in activity JSON for', profileUrl);
