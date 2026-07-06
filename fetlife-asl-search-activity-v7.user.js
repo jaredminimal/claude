@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.6.3
+// @version        8.7.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -304,7 +304,10 @@
                 <div id="asl-tabs">
                     <button class="on" data-t="search">Search</button>
                     <button data-t="results">Results <span id="asl-rtab-count"></span></button>
+                    <button data-t="active">Active <span id="asl-atab-count"></span></button>
                 </div>
+                <div id="asl-activity-progress"></div>
+                <button class="asl-b" id="asl-stop-activity" style="display:none">Stop Activity Check</button>
                 <div class="asl-tab on" id="asl-t-search">
                     <div class="sec">Step 1: Go to a Kinksters Page</div>
                     <p style="font-size:12px;color:#999;margin:0 0 10px">
@@ -344,11 +347,12 @@
                     <div id="asl-status"></div>
                 </div>
                 <div class="asl-tab" id="asl-t-results">
+                    <p style="font-size:12px;color:#999;margin:0 0 8px">Every profile found across your searches. Run an activity check to move active ones into the Active tab.</p>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Sort by</label>
                         <select id="asl-sort" style="width:auto;margin:0">
-                            <option value="activity" selected>Last active</option>
-                            <option value="newest">Newest first</option>
+                            <option value="newest" selected>Newest first</option>
+                            <option value="activity">Last active</option>
                             <option value="age-asc">Age (youngest)</option>
                             <option value="age-desc">Age (oldest)</option>
                             <option value="checked">Recently checked</option>
@@ -356,33 +360,48 @@
                     </div>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Check last</label>
-                        <input type="number" id="asl-check-limit" min="1" max="9999" value="5000" style="width:70px;margin:0">
+                        <input type="number" id="asl-check-limit" min="1" max="99999" value="5000" style="width:80px;margin:0">
                         <label class="fl" style="margin:0;white-space:nowrap">unchecked</label>
                     </div>
                     <button class="asl-b" id="asl-check-activity">Check Activity Now</button>
-                    <div class="sec">Re-check Activity by Age</div>
-                    <div class="row">
-                        <div><label class="fl">Min Age</label><input type="number" id="asl-recheck-amin" min="18" max="200" value="18" style="margin-bottom:4px"></div>
-                        <div><label class="fl">Max Age</label><input type="number" id="asl-recheck-amax" min="18" max="200" value="99" style="margin-bottom:4px"></div>
-                    </div>
-                    <button class="asl-b" id="asl-recheck" style="background:#d80;color:#fff;margin-top:0">Re-check Activity</button>
-                    <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
-                        <label class="fl" style="margin:0;white-space:nowrap">Re-check checked #</label>
-                        <input type="number" id="asl-recheck-from" min="1" max="99999" value="1" style="width:70px;margin:0">
-                        <label class="fl" style="margin:0;white-space:nowrap">to</label>
-                        <input type="number" id="asl-recheck-to" min="1" max="99999" value="500" style="width:70px;margin:0">
-                    </div>
-                    <label class="fl" style="margin:4px 0"><input type="checkbox" id="asl-recheck-skip-pics" checked> Skip profiles that already have a saved pic</label>
-                    <button class="asl-b" id="asl-recheck-last" style="background:#d80;color:#fff;margin-top:0">Re-check Range (refresh pics)</button>
-                    <button class="asl-b" id="asl-stop-activity">Stop Activity Check</button>
-                    <div id="asl-activity-progress"></div>
-                    <button class="asl-b" id="asl-csv">Export to CSV</button>
+                    <button class="asl-b" id="asl-csv">Export All to CSV</button>
                     <button class="asl-b" id="asl-import">Import CSV for Dedup</button>
                     <input type="file" id="asl-import-file" accept=".csv" style="display:none">
                     <div id="asl-seen-count"></div>
                     <button class="asl-b" id="asl-clear">Clear All Results</button>
                     <div id="asl-rcount"></div>
                     <div id="asl-res"></div>
+                </div>
+                <div class="asl-tab" id="asl-t-active">
+                    <p style="font-size:12px;color:#999;margin:0 0 8px">Profiles confirmed active within your threshold. Re-check to refresh their activity &amp; photos.</p>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Sort by</label>
+                        <select id="asl-active-sort" style="width:auto;margin:0">
+                            <option value="activity" selected>Last active</option>
+                            <option value="newest">Newest first</option>
+                            <option value="age-asc">Age (youngest)</option>
+                            <option value="age-desc">Age (oldest)</option>
+                            <option value="checked">Recently checked</option>
+                        </select>
+                    </div>
+                    <div class="sec">Re-check by Age</div>
+                    <div class="row">
+                        <div><label class="fl">Min Age</label><input type="number" id="asl-recheck-amin" min="18" max="200" value="18" style="margin-bottom:4px"></div>
+                        <div><label class="fl">Max Age</label><input type="number" id="asl-recheck-amax" min="18" max="200" value="99" style="margin-bottom:4px"></div>
+                    </div>
+                    <button class="asl-b" id="asl-recheck" style="background:#d80;color:#fff;margin-top:0">Re-check by Age</button>
+                    <div class="sec">Re-check by Range</div>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <label class="fl" style="margin:0;white-space:nowrap">Active #</label>
+                        <input type="number" id="asl-recheck-from" min="1" max="99999" value="1" style="width:70px;margin:0">
+                        <label class="fl" style="margin:0;white-space:nowrap">to</label>
+                        <input type="number" id="asl-recheck-to" min="1" max="99999" value="500" style="width:70px;margin:0">
+                    </div>
+                    <label class="fl" style="margin:4px 0"><input type="checkbox" id="asl-recheck-skip-pics" checked> Skip profiles that already have a saved pic</label>
+                    <button class="asl-b" id="asl-recheck-last" style="background:#d80;color:#fff;margin-top:0">Re-check Range (refresh pics)</button>
+                    <button class="asl-b" id="asl-active-csv" style="background:#2a6;color:#fff">Export Active to CSV</button>
+                    <div id="asl-active-count"></div>
+                    <div id="asl-active-res"></div>
                 </div>
             </div>
         `;
@@ -421,6 +440,8 @@
         document.getElementById('asl-recheck-last').addEventListener('click', recheckLastN);
         document.getElementById('asl-stop-activity').addEventListener('click', () => { activityCheckAbort = true; });
         document.getElementById('asl-sort').addEventListener('change', loadAndDisplayResults);
+        document.getElementById('asl-active-sort').addEventListener('change', loadAndDisplayResults);
+        document.getElementById('asl-active-csv').addEventListener('click', exportActiveCSV);
 
         // Load any existing results
         loadAndDisplayResults();
@@ -479,15 +500,11 @@
     }
 
     async function clearResults() {
+        if (!confirm('Clear ALL results? This cannot be undone. (Your "seen" dedup list is kept.)')) return;
         await dbClearResults();
         localStorage.removeItem(PROGRESS_KEY);
-        document.getElementById('asl-res').innerHTML = '';
-        document.getElementById('asl-rcount').textContent = '';
-        document.getElementById('asl-csv').style.display = 'none';
-        document.getElementById('asl-clear').style.display = 'none';
-        document.getElementById('asl-check-activity').style.display = 'none';
-        document.getElementById('asl-rtab-count').textContent = '';
         setStatus('Results cleared.');
+        await loadAndDisplayResults();
     }
 
     // =====================
@@ -665,6 +682,9 @@
     async function onPhase1Complete(s) {
         const totalCount = await dbGetCount();
         const activityDays = s.params ? s.params.activityDays : 0;
+
+        // Land on the Results tab now that the search is done
+        document.querySelector('#asl-tabs button[data-t="results"]')?.click();
 
         if (activityDays > 0 && totalCount > 0) {
             setStatus('Phase 1 done — ' + totalCount + ' matches from ' + s.scanned + ' scanned. Starting activity check...');
@@ -903,23 +923,32 @@
         }
     }
 
+    // Get the current Active set (checked + active within threshold), optionally skipping pics
+    async function getActiveSet(skipWithPics) {
+        const activityDays = parseInt(document.getElementById('asl-activity').value) || 90;
+        const cutoff = new Date();
+        cutoff.setDate(cutoff.getDate() - activityDays);
+        const results = await dbGetAllResults();
+        let active = results.filter(p => p.activityChecked && p.lastActivity && new Date(p.lastActivity) >= cutoff);
+        if (skipWithPics) active = active.filter(p => !(p.avatar && p.avatar.startsWith('data:')));
+        return active;
+    }
+
     async function recheckByAge() {
         const minAge = parseInt(document.getElementById('asl-recheck-amin').value) || 18;
         const maxAge = parseInt(document.getElementById('asl-recheck-amax').value) || 99;
-        const results = await dbGetAllResults();
-        const toReset = results.filter(p => p.activityChecked && p.age >= minAge && p.age <= maxAge);
+        const skipWithPics = document.getElementById('asl-recheck-skip-pics').checked;
+        let active = await getActiveSet(skipWithPics);
+        const toReset = active.filter(p => p.age >= minAge && p.age <= maxAge);
 
         if (toReset.length === 0) {
-            setStatus('No checked profiles found in age range ' + minAge + '-' + maxAge);
+            setStatus('No active profiles found in age range ' + minAge + '-' + maxAge + (skipWithPics ? ' (without a saved pic)' : ''));
             return;
         }
 
-        for (const p of toReset) {
-            p.activityChecked = false;
-            p.checkedAt = null;
-        }
+        for (const p of toReset) { p.activityChecked = false; p.checkedAt = null; }
         await dbPutResults(toReset);
-        setStatus('Re-checking ' + toReset.length + ' profiles (age ' + minAge + '-' + maxAge + ') with avatar refresh...');
+        setStatus('Re-checking ' + toReset.length + ' active profiles (age ' + minAge + '-' + maxAge + ') with avatar refresh...');
         await loadAndDisplayResults();
         setTimeout(() => startActivityCheck(true, toReset), 500);
     }
@@ -929,27 +958,20 @@
         let to = parseInt(document.getElementById('asl-recheck-to').value) || 500;
         if (from > to) { const t = from; from = to; to = t; }
         const skipWithPics = document.getElementById('asl-recheck-skip-pics').checked;
-        const results = await dbGetAllResults();
-        // Most recently checked first, then take the range (1-indexed, inclusive)
-        let checked = results.filter(p => p.activityChecked && p.checkedAt)
-                               .sort((a, b) => (b.checkedAt || 0) - (a.checkedAt || 0));
-        // Optionally skip profiles that already have a permanent (base64) pic
-        if (skipWithPics) {
-            checked = checked.filter(p => !(p.avatar && p.avatar.startsWith('data:')));
-        }
-        const toReset = checked.slice(from - 1, to);
+        let active = await getActiveSet(skipWithPics);
+        // Order to match the Active tab's current sort
+        const activeSort = (document.getElementById('asl-active-sort') || {}).value || 'activity';
+        active = sortProfiles(active, activeSort);
+        const toReset = active.slice(from - 1, to);
 
         if (toReset.length === 0) {
-            setStatus('No checked profiles found in range ' + from + '-' + to + ' (only ' + checked.length + ' checked total).');
+            setStatus('No active profiles in range ' + from + '-' + to + ' (only ' + active.length + ' active' + (skipWithPics ? ' without a pic' : '') + ').');
             return;
         }
 
-        for (const p of toReset) {
-            p.activityChecked = false;
-            p.checkedAt = null;
-        }
+        for (const p of toReset) { p.activityChecked = false; p.checkedAt = null; }
         await dbPutResults(toReset);
-        setStatus('Re-checking profiles #' + from + '-' + to + ' (' + toReset.length + ') with avatar refresh...');
+        setStatus('Re-checking active profiles #' + from + '-' + to + ' (' + toReset.length + ') with avatar refresh...');
         await loadAndDisplayResults();
         setTimeout(() => startActivityCheck(true, toReset), 500);
     }
@@ -1062,16 +1084,17 @@
         }
 
         stopBtn.style.display = 'none';
-        const remaining = allUnchecked.length - checked;
+        const remaining = unchecked.length - checked;
         const msg = activityCheckAbort
-            ? `Activity check paused — ${checked}/${total} checked. ${active} active, ${inactive} inactive.${remaining > 0 ? ' ' + remaining + ' still unchecked.' : ''}`
-            : `Activity check complete! ${active} active, ${inactive} inactive out of ${total} checked.${remaining > 0 ? ' ' + remaining + ' still unchecked.' : ''}`;
+            ? `Activity check paused — ${checked}/${total} checked. ${active} active, ${inactive} inactive.${remaining > 0 ? ' ' + remaining + ' remaining in batch.' : ''}`
+            : `Activity check complete! ${active} active, ${inactive} inactive out of ${total} checked.`;
         progressEl.innerHTML = `<strong>${msg}</strong>`;
         setStatus(msg);
-        // Switch to "Last active" sort so most recently active profiles show first
-        const sortEl = document.getElementById('asl-sort');
+        // Show the freshly-active profiles in the Active tab
+        const sortEl = document.getElementById('asl-active-sort');
         if (sortEl) sortEl.value = 'activity';
         await loadAndDisplayResults();
+        document.querySelector('#asl-tabs button[data-t="active"]')?.click();
     }
 
     // =====================
@@ -1207,173 +1230,145 @@
         return div;
     }
 
-    async function loadAndDisplayResults() {
-        const results = await dbGetAllResults();
-        const container = document.getElementById('asl-res');
-        if (!container) return;
-
-        container.innerHTML = '';
-        const countEl = document.getElementById('asl-rcount');
-        const activityDays = parseInt(document.getElementById('asl-activity').value) || 0;
-
-        const sortMode = (document.getElementById('asl-sort') || {}).value || 'activity';
-        let displayResults = results;
-        let filteredCount = 0;
-
-        if (sortMode === 'checked') {
-            const cutoff = new Date();
-            cutoff.setDate(cutoff.getDate() - (activityDays || 90));
-            displayResults = results.filter(p => {
-                if (!p.activityChecked) return false;
-                if (!p.lastActivity) return false;
-                return new Date(p.lastActivity) >= cutoff;
-            });
-        } else if (activityDays > 0) {
-            const cutoff = new Date();
-            cutoff.setDate(cutoff.getDate() - activityDays);
-            displayResults = results.filter(p => {
-                if (!p.activityChecked) return true;
-                if (!p.lastActivity) { filteredCount++; return false; }
-                const d = new Date(p.lastActivity);
-                if (d >= cutoff) return true;
-                filteredCount++;
-                return false;
-            });
-        }
-
-        if (results.length === 0) {
-            countEl.textContent = 'No results yet.';
-            document.getElementById('asl-csv').style.display = 'none';
-            document.getElementById('asl-clear').style.display = 'none';
-            document.getElementById('asl-check-activity').style.display = 'none';
-            document.getElementById('asl-rtab-count').textContent = '';
-            return;
-        }
-
-        const uncheckedCount = results.filter(p => !p.activityChecked).length;
-        let statusText = displayResults.length + ' matches shown';
-        if (filteredCount > 0) statusText += ' (' + filteredCount + ' filtered as inactive)';
-        if (uncheckedCount > 0 && activityDays > 0) statusText += ' — ' + uncheckedCount + ' not yet checked';
-        countEl.textContent = statusText;
-
-        document.getElementById('asl-csv').style.display = 'block';
-        document.getElementById('asl-clear').style.display = 'block';
-        document.getElementById('asl-rtab-count').textContent = '(' + displayResults.length + ')';
-
-        // Show "Check Activity" button if there are unchecked results and filter is active
-        const checkBtn = document.getElementById('asl-check-activity');
-        if (uncheckedCount > 0 && activityDays > 0) {
-            checkBtn.style.display = 'block';
-            checkBtn.textContent = 'Check Activity (' + uncheckedCount + ' unchecked)';
-        } else {
-            checkBtn.style.display = 'none';
-        }
-
-        // Sort results
-        let sorted = [...displayResults];
+    function sortProfiles(list, sortMode) {
+        const sorted = [...list];
         if (sortMode === 'newest') {
             sorted.sort((a, b) => {
-                // Primary: batch number descending (most recent search first)
                 const batchDiff = (b.batch || 0) - (a.batch || 0);
                 if (batchDiff !== 0) return batchDiff;
-                // Secondary: foundAt descending within same batch
                 return (b.foundAt || 0) - (a.foundAt || 0);
             });
         } else if (sortMode === 'age-asc') {
             sorted.sort((a, b) => (a.age || 999) - (b.age || 999));
         } else if (sortMode === 'age-desc') {
             sorted.sort((a, b) => (b.age || 0) - (a.age || 0));
-        } else if (sortMode === 'activity') {
+        } else if (sortMode === 'checked') {
+            sorted.sort((a, b) => (b.checkedAt || 0) - (a.checkedAt || 0));
+        } else { // 'activity'
             sorted.sort((a, b) => {
                 const da = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
                 const db = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
                 return db - da;
             });
-        } else if (sortMode === 'checked') {
-            sorted.sort((a, b) => (b.checkedAt || 0) - (a.checkedAt || 0));
         }
+        return sorted;
+    }
 
-        // Paginated rendering — show 50 at a time
+    function buildProfileCard(p, activityDays) {
+        const d = document.createElement('div');
+        d.className = 'asl-r';
+        const avLink = document.createElement('a');
+        avLink.className = 'av';
+        avLink.href = p.url;
+        avLink.target = '_blank';
+        if (p.avatar) {
+            const img = document.createElement('img');
+            img.src = p.avatar;
+            img.alt = '';
+            img.loading = 'lazy';
+            img.addEventListener('error', function() { this.replaceWith(makePlaceholder()); });
+            avLink.appendChild(img);
+        } else {
+            avLink.appendChild(makePlaceholder());
+        }
+        const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
+        let activityLine = '';
+        if (p.activityChecked) {
+            if (p.lastActivity) {
+                const dd = new Date(p.lastActivity);
+                const dateStr = dd.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                const daysAgo = Math.floor((Date.now() - dd.getTime()) / 86400000);
+                const isRecent = daysAgo <= (activityDays || 90);
+                activityLine = `<div class="m ${isRecent ? 'active' : 'inactive'}">Last active: ${dateStr} (${daysAgo}d ago)</div>`;
+            } else if (p.activityError) {
+                activityLine = `<div class="m inactive">Activity check failed (${p.activityError})</div>`;
+            } else {
+                activityLine = `<div class="m inactive">No activity found</div>`;
+            }
+        }
+        d.appendChild(avLink);
+        const infoHtml = `<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}${activityLine}</div><div class="act"><a href="${esc(p.url)}" target="_blank">Profile</a><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Message</a></div>`;
+        d.insertAdjacentHTML('beforeend', infoHtml);
+        return d;
+    }
+
+    function renderProfileList(containerId, profiles, sortMode, activityDays, showBatchDividers) {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+        container.innerHTML = '';
+        const sorted = sortProfiles(profiles, sortMode);
         const PAGE_SIZE = 50;
+        const loadMoreId = containerId + '-more';
         let shown = 0;
 
         function renderBatch() {
             const batch = sorted.slice(shown, shown + PAGE_SIZE);
             let currentBatch = shown > 0 ? (sorted[shown - 1] || {}).batch : null;
-
             for (const p of batch) {
-                if (sortMode === 'newest' && p.batch && p.batch !== currentBatch) {
+                if (showBatchDividers && sortMode === 'newest' && p.batch && p.batch !== currentBatch) {
                     currentBatch = p.batch;
                     const divider = document.createElement('div');
                     divider.className = 'asl-batch-divider';
                     divider.textContent = '— Search ' + p.batch + ' (pages ' + (p.batchPages || '?') + ') —';
                     container.appendChild(divider);
                 }
-
-                const d = document.createElement('div');
-                d.className = 'asl-r';
-
-                // Build avatar with proper error handling (no inline onerror)
-                const avLink = document.createElement('a');
-                avLink.className = 'av';
-                avLink.href = p.url;
-                avLink.target = '_blank';
-                if (p.avatar) {
-                    const img = document.createElement('img');
-                    img.src = p.avatar;
-                    img.alt = '';
-                    img.loading = 'lazy';
-                    img.addEventListener('error', function() {
-                        this.replaceWith(makePlaceholder());
-                    });
-                    avLink.appendChild(img);
-                } else {
-                    avLink.appendChild(makePlaceholder());
-                }
-                const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
-
-                let activityLine = '';
-                if (p.activityChecked) {
-                    if (p.lastActivity) {
-                        const d = new Date(p.lastActivity);
-                        const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-                        const daysAgo = Math.floor((Date.now() - d.getTime()) / 86400000);
-                        const isRecent = daysAgo <= (activityDays || 90);
-                        activityLine = `<div class="m ${isRecent ? 'active' : 'inactive'}">Last active: ${dateStr} (${daysAgo}d ago)</div>`;
-                    } else if (p.activityError) {
-                        activityLine = `<div class="m inactive">Activity check failed (${p.activityError})</div>`;
-                    } else {
-                        activityLine = `<div class="m inactive">No activity found</div>`;
-                    }
-                }
-
-                d.appendChild(avLink);
-                const infoHtml = `<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}${activityLine}</div><div class="act"><a href="${esc(p.url)}" target="_blank">Profile</a><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Message</a></div>`;
-                d.insertAdjacentHTML('beforeend', infoHtml);
-                container.appendChild(d);
+                container.appendChild(buildProfileCard(p, activityDays));
             }
             shown += batch.length;
-
-            // Remove old load-more button if exists
-            const oldBtn = document.getElementById('asl-load-more');
+            const oldBtn = document.getElementById(loadMoreId);
             if (oldBtn) oldBtn.remove();
-
             if (shown < sorted.length) {
                 const btn = document.createElement('button');
-                btn.id = 'asl-load-more';
+                btn.id = loadMoreId;
                 btn.className = 'asl-b';
+                btn.style.background = '#47a';
+                btn.style.color = '#fff';
                 btn.textContent = 'Load More (' + (sorted.length - shown) + ' remaining)';
                 btn.addEventListener('click', renderBatch);
                 container.appendChild(btn);
             }
         }
         renderBatch();
+    }
 
-        // Switch to results tab
-        const s = getSavedState();
-        if (s && !s.active) {
-            document.querySelector('#asl-tabs button[data-t="results"]')?.click();
+    async function loadAndDisplayResults() {
+        const results = await dbGetAllResults();
+        const activityDays = parseInt(document.getElementById('asl-activity').value) || 90;
+        const total = results.length;
+        const checkedCount = results.filter(p => p.activityChecked).length;
+        const uncheckedCount = total - checkedCount;
+
+        // Active = checked, has a lastActivity within the threshold
+        const cutoff = new Date();
+        cutoff.setDate(cutoff.getDate() - activityDays);
+        const active = results.filter(p => p.activityChecked && p.lastActivity && new Date(p.lastActivity) >= cutoff);
+
+        // Counters
+        const rcount = document.getElementById('asl-rcount');
+        if (rcount) rcount.textContent = total === 0 ? 'No results yet.' : (total + ' total · ' + checkedCount + ' checked · ' + uncheckedCount + ' unchecked');
+        const acount = document.getElementById('asl-active-count');
+        if (acount) acount.textContent = active.length + ' active profiles';
+        const rtab = document.getElementById('asl-rtab-count');
+        if (rtab) rtab.textContent = total ? ('(' + total + ')') : '';
+        const atab = document.getElementById('asl-atab-count');
+        if (atab) atab.textContent = active.length ? ('(' + active.length + ')') : '';
+
+        // Buttons
+        const checkBtn = document.getElementById('asl-check-activity');
+        if (checkBtn) {
+            checkBtn.style.display = total ? 'block' : 'none';
+            checkBtn.textContent = 'Check Activity (' + uncheckedCount + ' unchecked)';
         }
+        const csvBtn = document.getElementById('asl-csv');
+        if (csvBtn) csvBtn.style.display = total ? 'block' : 'none';
+        const clearBtn = document.getElementById('asl-clear');
+        if (clearBtn) clearBtn.style.display = total ? 'block' : 'none';
+
+        // Render both lists
+        const resultsSort = (document.getElementById('asl-sort') || {}).value || 'newest';
+        const activeSort = (document.getElementById('asl-active-sort') || {}).value || 'activity';
+        renderProfileList('asl-res', results, resultsSort, activityDays, true);
+        renderProfileList('asl-active-res', active, activeSort, activityDays, false);
     }
 
     // =====================
@@ -1429,11 +1424,9 @@
     // =====================
     // CSV EXPORT
     // =====================
-    async function exportCSV() {
-        const results = await dbGetAllResults();
-        if (results.length === 0) { alert('No results'); return; }
+    function writeCSV(rows, filenamePrefix) {
         const hdr = ['Nickname','Age','Gender','Role','Location','Last Active','Profile URL'];
-        const rows = results.map(p => {
+        const dataRows = rows.map(p => {
             let lastActive = '';
             if (p.lastActivity) {
                 lastActive = new Date(p.lastActivity).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -1442,12 +1435,25 @@
             }
             return [p.nickname, p.age||'', p.gender||'', p.role||'', p.location||'', lastActive, p.url];
         });
-        const csv = [hdr,...rows].map(r => r.map(c => '"'+String(c).replace(/"/g,'""')+'"').join(',')).join('\n');
+        const csv = [hdr,...dataRows].map(r => r.map(c => '"'+String(c).replace(/"/g,'""')+'"').join(',')).join('\n');
         const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
-        a.download = 'fetlife-activity-' + new Date().toISOString().slice(0,10) + '.csv';
+        a.download = filenamePrefix + '-' + new Date().toISOString().slice(0,10) + '.csv';
         document.body.appendChild(a); a.click(); a.remove();
+    }
+
+    async function exportCSV() {
+        const results = await dbGetAllResults();
+        if (results.length === 0) { alert('No results'); return; }
+        writeCSV(results, 'fetlife-all-results');
+    }
+
+    async function exportActiveCSV() {
+        const active = await getActiveSet(false);
+        if (active.length === 0) { alert('No active profiles'); return; }
+        const activeSort = (document.getElementById('asl-active-sort') || {}).value || 'activity';
+        writeCSV(sortProfiles(active, activeSort), 'fetlife-active');
     }
 
     function esc(s) {
