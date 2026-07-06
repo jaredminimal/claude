@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.5.2
+// @version        8.5.3
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -869,16 +869,24 @@
 
     async function fetchFreshAvatar(profileUrl) {
         try {
-            const resp = await gmFetch(profileUrl, { 'Accept': 'text/html' });
-            if (!resp.ok) return null;
-            const html = resp.responseText;
-            // Look for CDN avatar URLs in the HTML (skip generic og:image)
-            const cdnMatch = html.match(/src="(https:\/\/pic[^"]*cdn\.fetlife\.com[^"]+)"/);
-            if (cdnMatch && cdnMatch[1]) {
-                return await fetchImageAsBase64(cdnMatch[1]);
+            // The /activity endpoint returns real JSON (not a Vue shell) and
+            // contains CDN avatar URLs. Scan the raw text for any CDN image URL.
+            const activityUrl = profileUrl.replace(/\/?$/, '/activity');
+            const resp = await gmFetch(activityUrl, { 'Accept': 'application/json' });
+            if (resp.ok && resp.responseText) {
+                const cdnMatch = resp.responseText.match(/https:\\?\/\\?\/pic[a-z0-9-]*\.cdn\.fetlife\.com[^"'\\ ]+/i);
+                if (cdnMatch) {
+                    // Un-escape any JSON-escaped slashes; return the fresh URL directly
+                    // (fresh signed URLs render reliably; base64 may be blocked by page CSP)
+                    const cleanUrl = cdnMatch[0].replace(/\\\//g, '/');
+                    console.log('[ASL] Found fresh avatar URL in activity JSON:', cleanUrl.substring(0, 60));
+                    return cleanUrl;
+                }
+                console.log('[ASL] No CDN avatar URL found in activity JSON for', profileUrl);
             }
             return null;
         } catch(e) {
+            console.error('[ASL] fetchFreshAvatar error:', e);
             return null;
         }
     }
