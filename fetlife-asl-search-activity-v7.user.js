@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.4.1
+// @version        8.5.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -614,6 +614,13 @@
                 }
             }
             if (newResults.length > 0) {
+                // Convert avatar URLs to base64 so they never expire
+                await Promise.all(newResults.map(async (p) => {
+                    if (p.avatar && !p.avatar.startsWith('data:')) {
+                        const b64 = await fetchImageAsBase64(p.avatar);
+                        if (b64) p.avatar = b64;
+                    }
+                }));
                 await dbPutResults(newResults);
                 await dbAddSeenNicknames(newResults.map(r => r.nickname));
             }
@@ -741,6 +748,26 @@
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
+    // Convert image URL to base64 data URL via GM_xmlhttpRequest (bypasses CORS)
+    function fetchImageAsBase64(url) {
+        if (!url || url.startsWith('data:')) return Promise.resolve(url);
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: url,
+                responseType: 'blob',
+                onload: function(resp) {
+                    if (resp.status !== 200) { resolve(''); return; }
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result || '');
+                    reader.onerror = () => resolve('');
+                    reader.readAsDataURL(resp.response);
+                },
+                onerror: function() { resolve(''); }
+            });
+        });
+    }
+
     // GM_xmlhttpRequest wrapper — bypasses FetLife's service worker
     function gmFetch(url, headers) {
         return new Promise((resolve, reject) => {
@@ -819,13 +846,16 @@
             const resp = await gmFetch(profileUrl, { 'Accept': 'text/html' });
             if (!resp.ok) return null;
             const html = resp.responseText;
-            // Look for og:image meta tag — most reliable source for avatar
+            let imgUrl = null;
             const ogMatch = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/);
-            if (ogMatch && ogMatch[1]) return ogMatch[1];
-            // Fallback: look for avatar img
-            const imgMatch = html.match(/<img[^>]+class="[^"]*ipp[^"]*"[^>]+src="([^"]+)"/);
-            if (imgMatch && imgMatch[1]) return imgMatch[1];
-            return null;
+            if (ogMatch && ogMatch[1]) imgUrl = ogMatch[1];
+            if (!imgUrl) {
+                const imgMatch = html.match(/<img[^>]+class="[^"]*ipp[^"]*"[^>]+src="([^"]+)"/);
+                if (imgMatch && imgMatch[1]) imgUrl = imgMatch[1];
+            }
+            if (!imgUrl) return null;
+            // Convert to base64 so it never expires
+            return await fetchImageAsBase64(imgUrl);
         } catch(e) {
             return null;
         }
