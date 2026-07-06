@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.7.3
+// @version        8.7.4
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -843,6 +843,15 @@
             });
         });
     }
+
+    // Debug helper: run aslDebugActivity('nickname') in the console to dump
+    // the raw activity JSON so we can inspect its structure.
+    window.aslDebugActivity = async function(nickname) {
+        const resp = await gmFetch('https://fetlife.com/' + nickname + '/activity', { 'Accept': 'application/json' });
+        console.log('[ASL DEBUG] status:', resp.status);
+        console.log('[ASL DEBUG] first 4000 chars:\n', (resp.responseText || '').substring(0, 4000));
+        return resp.responseText;
+    };
 
     async function fetchActivityDate(profileUrl) {
         try {
