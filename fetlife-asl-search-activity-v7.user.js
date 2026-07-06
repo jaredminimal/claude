@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.7.1
+// @version        8.7.2
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -896,22 +896,25 @@
         return { date: null, error: null };
     }
 
-    // Find a CDN image URL nested anywhere inside an object
-    function findCdnUrlIn(obj, depth) {
-        if (obj == null || depth > 5) return null;
-        if (typeof obj === 'string') {
-            return /pic[a-z0-9-]*\.cdn\.fetlife\.com/i.test(obj) ? obj : null;
+    // Extract a CDN image URL, but ONLY from a value under an "avatar" key.
+    // (Never grabs post images or other nested pictures.)
+    function extractAvatarUrl(val, depth) {
+        if (val == null || depth > 4) return null;
+        if (typeof val === 'string') {
+            return /pic[a-z0-9-]*\.cdn\.fetlife\.com/i.test(val) ? val : null;
         }
-        if (typeof obj === 'object') {
-            for (const k in obj) {
-                const r = findCdnUrlIn(obj[k], depth + 1);
+        if (typeof val === 'object') {
+            // avatar objects often hold size variants — take any cdn url within
+            for (const k in val) {
+                const r = extractAvatarUrl(val[k], depth + 1);
                 if (r) return r;
             }
         }
         return null;
     }
 
-    // Walk the JSON to find the avatar belonging specifically to `nickname`
+    // Walk the JSON to find the AVATAR field of the object whose nickname
+    // matches the profile owner. Requires an actual avatar-named key.
     function findAvatarForNickname(obj, nickname, depth) {
         if (obj == null || depth > 8) return null;
         if (Array.isArray(obj)) {
@@ -922,11 +925,15 @@
             return null;
         }
         if (typeof obj === 'object') {
-            // Does this object represent the target user?
             const nn = (obj.nickname || obj.username || obj.slug || '').toString().toLowerCase();
             if (nn && nn === nickname.toLowerCase()) {
-                const url = findCdnUrlIn(obj, 0);
-                if (url) return url;
+                // Look for an avatar-named key on this owner object
+                for (const k in obj) {
+                    if (/avatar/i.test(k)) {
+                        const url = extractAvatarUrl(obj[k], 0);
+                        if (url) return url;
+                    }
+                }
             }
             for (const k in obj) {
                 const r = findAvatarForNickname(obj[k], nickname, depth + 1);
@@ -1090,7 +1097,9 @@
                     fetchActivityDate(p.url),
                     fetchFreshAvatar(p.url)
                 ]);
-                if (freshAvatar) p.avatar = freshAvatar;
+                // Deliberate refresh: set the verified avatar, or clear it so a
+                // wrong/old pic becomes "?" instead of persisting.
+                p.avatar = freshAvatar || '';
             } else {
                 result = await fetchActivityDate(p.url);
             }
