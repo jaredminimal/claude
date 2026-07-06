@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.8.0
+// @version        8.8.1
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -888,11 +888,12 @@
         return m ? m[1] : null;
     }
 
-    async function fetchActivityDate(profileUrl) {
+    async function fetchActivityDate(profileUrl, wantAvatar) {
         try {
             const activityUrl = profileUrl.replace(/\/?$/, '/activity');
             const resp = await gmFetch(activityUrl, { 'Accept': 'application/json' });
             const canonical = nicknameFromUrl(resp.finalUrl);
+            const origNick = profileUrl.replace(/\/+$/, '').split('/').pop();
 
             if (!resp.ok) {
                 console.log('[ASL] Activity fetch failed:', resp.status, profileUrl);
@@ -919,7 +920,23 @@
                     }
                 }
             }
-            return { date: latest, error: null, canonical };
+
+            // If requested, extract the avatar from THIS SAME response (no extra request)
+            let avatar;
+            if (wantAvatar) {
+                const matchNick = canonical || origNick;
+                const url = findAvatarForNickname(data, matchNick, 0);
+                if (url) {
+                    const cleanUrl = url.replace(/\\\//g, '/');
+                    console.log('[ASL] Matched avatar for', matchNick, ':', cleanUrl.substring(0, 60));
+                    const b64 = await fetchImageAsBase64(cleanUrl);
+                    avatar = b64 || cleanUrl;
+                } else {
+                    console.log('[ASL] No avatar matched to', matchNick);
+                    avatar = null;
+                }
+            }
+            return { date: latest, error: null, canonical, avatar };
         } catch (e) {
             console.error('[ASL] Activity fetch error:', e, profileUrl);
             return { date: null, error: e.message };
@@ -1140,22 +1157,18 @@
                 <div class="bar"><div class="fill" style="width:${Math.round(checked/total*100)}%"></div></div>
             `;
 
-            let result, avatarInfo;
+            // One request to /activity gives both the date and (in refresh mode)
+            // the avatar — avoids the redundant second call that caused rate-limit errors.
+            const result = await fetchActivityDate(p.url, refreshAvatars);
             if (refreshAvatars) {
-                [result, avatarInfo] = await Promise.all([
-                    fetchActivityDate(p.url),
-                    fetchFreshAvatar(p.url)
-                ]);
                 // Deliberate refresh: set the verified avatar, or clear it so a
                 // wrong/old pic becomes "?" instead of persisting.
-                p.avatar = (avatarInfo && avatarInfo.avatar) || '';
-            } else {
-                result = await fetchActivityDate(p.url);
+                p.avatar = result.avatar || '';
             }
 
             // Handle username changes: if the profile redirected to a new
             // nickname, migrate the record to the new key.
-            const canonical = (result && result.canonical) || (avatarInfo && avatarInfo.canonical);
+            const canonical = result && result.canonical;
             if (canonical && canonical.toLowerCase() !== p.nickname.toLowerCase()) {
                 console.log('[ASL] Username change:', p.nickname, '→', canonical);
                 await dbDelete(p.nickname);
