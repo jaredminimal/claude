@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.7.2
+// @version        8.7.3
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -377,8 +377,8 @@
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Sort by</label>
                         <select id="asl-active-sort" style="width:auto;margin:0">
-                            <option value="activity" selected>Last active</option>
-                            <option value="newest">Newest first</option>
+                            <option value="newest" selected>Newest first</option>
+                            <option value="activity">Last active</option>
                             <option value="age-asc">Age (youngest)</option>
                             <option value="age-desc">Age (oldest)</option>
                             <option value="checked">Recently checked</option>
@@ -1144,8 +1144,6 @@
         progressEl.innerHTML = `<strong>${msg}</strong>`;
         setStatus(msg);
         // Show the freshly-active profiles in the Active tab
-        const sortEl = document.getElementById('asl-active-sort');
-        if (sortEl) sortEl.value = 'activity';
         await loadAndDisplayResults();
         document.querySelector('#asl-tabs button[data-t="active"]')?.click();
     }
@@ -1419,9 +1417,9 @@
 
         // Render both lists
         const resultsSort = (document.getElementById('asl-sort') || {}).value || 'newest';
-        const activeSort = (document.getElementById('asl-active-sort') || {}).value || 'activity';
+        const activeSort = (document.getElementById('asl-active-sort') || {}).value || 'newest';
         renderProfileList('asl-res', results, resultsSort, activityDays, true);
-        renderProfileList('asl-active-res', active, activeSort, activityDays, false);
+        renderProfileList('asl-active-res', active, activeSort, activityDays, true);
     }
 
     // =====================
