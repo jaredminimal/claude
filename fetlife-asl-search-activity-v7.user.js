@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.6.2
+// @version        8.6.3
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -919,9 +919,9 @@
             p.checkedAt = null;
         }
         await dbPutResults(toReset);
-        setStatus('Reset ' + toReset.length + ' profiles (age ' + minAge + '-' + maxAge + '). Starting activity re-check with avatar refresh...');
+        setStatus('Re-checking ' + toReset.length + ' profiles (age ' + minAge + '-' + maxAge + ') with avatar refresh...');
         await loadAndDisplayResults();
-        setTimeout(() => startActivityCheck(true), 500);
+        setTimeout(() => startActivityCheck(true, toReset), 500);
     }
 
     async function recheckLastN() {
@@ -949,12 +949,12 @@
             p.checkedAt = null;
         }
         await dbPutResults(toReset);
-        setStatus('Reset checked profiles #' + from + '-' + to + ' (' + toReset.length + '). Re-checking with avatar refresh...');
+        setStatus('Re-checking profiles #' + from + '-' + to + ' (' + toReset.length + ') with avatar refresh...');
         await loadAndDisplayResults();
-        setTimeout(() => startActivityCheck(true), 500);
+        setTimeout(() => startActivityCheck(true, toReset), 500);
     }
 
-    async function startActivityCheck(refreshAvatars) {
+    async function startActivityCheck(refreshAvatars, explicitProfiles) {
         const results = await dbGetAllResults();
         if (results.length === 0) {
             setStatus('No results to check activity for.');
@@ -970,14 +970,20 @@
         const cutoffDate = new Date();
         cutoffDate.setDate(cutoffDate.getDate() - activityDays);
 
-        const allUnchecked = results.filter(p => !p.activityChecked);
-        if (allUnchecked.length === 0) {
-            setStatus('All profiles already checked. Filtering...');
-            await loadAndDisplayResults();
-            return;
+        let unchecked;
+        if (explicitProfiles && explicitProfiles.length) {
+            // Re-check exactly the profiles passed in (nothing else)
+            unchecked = explicitProfiles;
+        } else {
+            const allUnchecked = results.filter(p => !p.activityChecked);
+            if (allUnchecked.length === 0) {
+                setStatus('All profiles already checked. Filtering...');
+                await loadAndDisplayResults();
+                return;
+            }
+            const checkLimit = parseInt(document.getElementById('asl-check-limit').value) || 100;
+            unchecked = allUnchecked.slice(-checkLimit);
         }
-        const checkLimit = parseInt(document.getElementById('asl-check-limit').value) || 100;
-        const unchecked = allUnchecked.slice(-checkLimit);
 
         activityCheckAbort = false;
         lastCheckBatchTime = Date.now();
