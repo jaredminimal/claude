@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.5.4
+// @version        8.6.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -366,6 +366,12 @@
                         <div><label class="fl">Max Age</label><input type="number" id="asl-recheck-amax" min="18" max="200" value="99" style="margin-bottom:4px"></div>
                     </div>
                     <button class="asl-b" id="asl-recheck" style="background:#d80;color:#fff;margin-top:0">Re-check Activity</button>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Re-check last</label>
+                        <input type="number" id="asl-recheck-last-n" min="1" max="99999" value="500" style="width:80px;margin:0">
+                        <label class="fl" style="margin:0;white-space:nowrap">checked profiles</label>
+                    </div>
+                    <button class="asl-b" id="asl-recheck-last" style="background:#d80;color:#fff;margin-top:0">Re-check Last N (refresh pics)</button>
                     <button class="asl-b" id="asl-stop-activity">Stop Activity Check</button>
                     <div id="asl-activity-progress"></div>
                     <button class="asl-b" id="asl-csv">Export to CSV</button>
@@ -410,6 +416,7 @@
         document.getElementById('asl-clear').addEventListener('click', clearResults);
         document.getElementById('asl-check-activity').addEventListener('click', startActivityCheck);
         document.getElementById('asl-recheck').addEventListener('click', recheckByAge);
+        document.getElementById('asl-recheck-last').addEventListener('click', recheckLastN);
         document.getElementById('asl-stop-activity').addEventListener('click', () => { activityCheckAbort = true; });
         document.getElementById('asl-sort').addEventListener('change', loadAndDisplayResults);
 
@@ -911,6 +918,29 @@
         }
         await dbPutResults(toReset);
         setStatus('Reset ' + toReset.length + ' profiles (age ' + minAge + '-' + maxAge + '). Starting activity re-check with avatar refresh...');
+        await loadAndDisplayResults();
+        setTimeout(() => startActivityCheck(true), 500);
+    }
+
+    async function recheckLastN() {
+        const n = parseInt(document.getElementById('asl-recheck-last-n').value) || 500;
+        const results = await dbGetAllResults();
+        // Most recently checked first, then take the top N
+        const checked = results.filter(p => p.activityChecked && p.checkedAt)
+                               .sort((a, b) => (b.checkedAt || 0) - (a.checkedAt || 0));
+        const toReset = checked.slice(0, n);
+
+        if (toReset.length === 0) {
+            setStatus('No recently checked profiles found to re-check.');
+            return;
+        }
+
+        for (const p of toReset) {
+            p.activityChecked = false;
+            p.checkedAt = null;
+        }
+        await dbPutResults(toReset);
+        setStatus('Reset last ' + toReset.length + ' checked profiles. Re-checking with avatar refresh...');
         await loadAndDisplayResults();
         setTimeout(() => startActivityCheck(true), 500);
     }
