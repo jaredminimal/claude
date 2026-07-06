@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.6.0
+// @version        8.6.2
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -367,11 +367,13 @@
                     </div>
                     <button class="asl-b" id="asl-recheck" style="background:#d80;color:#fff;margin-top:0">Re-check Activity</button>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
-                        <label class="fl" style="margin:0;white-space:nowrap">Re-check last</label>
-                        <input type="number" id="asl-recheck-last-n" min="1" max="99999" value="500" style="width:80px;margin:0">
-                        <label class="fl" style="margin:0;white-space:nowrap">checked profiles</label>
+                        <label class="fl" style="margin:0;white-space:nowrap">Re-check checked #</label>
+                        <input type="number" id="asl-recheck-from" min="1" max="99999" value="1" style="width:70px;margin:0">
+                        <label class="fl" style="margin:0;white-space:nowrap">to</label>
+                        <input type="number" id="asl-recheck-to" min="1" max="99999" value="500" style="width:70px;margin:0">
                     </div>
-                    <button class="asl-b" id="asl-recheck-last" style="background:#d80;color:#fff;margin-top:0">Re-check Last N (refresh pics)</button>
+                    <label class="fl" style="margin:4px 0"><input type="checkbox" id="asl-recheck-skip-pics" checked> Skip profiles that already have a saved pic</label>
+                    <button class="asl-b" id="asl-recheck-last" style="background:#d80;color:#fff;margin-top:0">Re-check Range (refresh pics)</button>
                     <button class="asl-b" id="asl-stop-activity">Stop Activity Check</button>
                     <div id="asl-activity-progress"></div>
                     <button class="asl-b" id="asl-csv">Export to CSV</button>
@@ -923,15 +925,22 @@
     }
 
     async function recheckLastN() {
-        const n = parseInt(document.getElementById('asl-recheck-last-n').value) || 500;
+        let from = parseInt(document.getElementById('asl-recheck-from').value) || 1;
+        let to = parseInt(document.getElementById('asl-recheck-to').value) || 500;
+        if (from > to) { const t = from; from = to; to = t; }
+        const skipWithPics = document.getElementById('asl-recheck-skip-pics').checked;
         const results = await dbGetAllResults();
-        // Most recently checked first, then take the top N
-        const checked = results.filter(p => p.activityChecked && p.checkedAt)
+        // Most recently checked first, then take the range (1-indexed, inclusive)
+        let checked = results.filter(p => p.activityChecked && p.checkedAt)
                                .sort((a, b) => (b.checkedAt || 0) - (a.checkedAt || 0));
-        const toReset = checked.slice(0, n);
+        // Optionally skip profiles that already have a permanent (base64) pic
+        if (skipWithPics) {
+            checked = checked.filter(p => !(p.avatar && p.avatar.startsWith('data:')));
+        }
+        const toReset = checked.slice(from - 1, to);
 
         if (toReset.length === 0) {
-            setStatus('No recently checked profiles found to re-check.');
+            setStatus('No checked profiles found in range ' + from + '-' + to + ' (only ' + checked.length + ' checked total).');
             return;
         }
 
@@ -940,7 +949,7 @@
             p.checkedAt = null;
         }
         await dbPutResults(toReset);
-        setStatus('Reset last ' + toReset.length + ' checked profiles. Re-checking with avatar refresh...');
+        setStatus('Reset checked profiles #' + from + '-' + to + ' (' + toReset.length + '). Re-checking with avatar refresh...');
         await loadAndDisplayResults();
         setTimeout(() => startActivityCheck(true), 500);
     }
