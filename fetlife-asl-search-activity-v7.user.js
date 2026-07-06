@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.4.0
+// @version        8.4.1
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -847,12 +847,12 @@
             p.checkedAt = null;
         }
         await dbPutResults(toReset);
-        setStatus('Reset ' + toReset.length + ' profiles (age ' + minAge + '-' + maxAge + '). Starting activity re-check...');
+        setStatus('Reset ' + toReset.length + ' profiles (age ' + minAge + '-' + maxAge + '). Starting activity re-check with avatar refresh...');
         await loadAndDisplayResults();
-        setTimeout(() => startActivityCheck(), 500);
+        setTimeout(() => startActivityCheck(true), 500);
     }
 
-    async function startActivityCheck() {
+    async function startActivityCheck(refreshAvatars) {
         const results = await dbGetAllResults();
         if (results.length === 0) {
             setStatus('No results to check activity for.');
@@ -910,13 +910,16 @@
                 <div class="bar"><div class="fill" style="width:${Math.round(checked/total*100)}%"></div></div>
             `;
 
-            // Fetch activity and fresh avatar in parallel
-            const [result, avatarResult] = await Promise.all([
-                fetchActivityDate(p.url),
-                fetchFreshAvatar(p.url)
-            ]);
-
-            if (avatarResult) p.avatar = avatarResult;
+            let result, freshAvatar;
+            if (refreshAvatars) {
+                [result, freshAvatar] = await Promise.all([
+                    fetchActivityDate(p.url),
+                    fetchFreshAvatar(p.url)
+                ]);
+                if (freshAvatar) p.avatar = freshAvatar;
+            } else {
+                result = await fetchActivityDate(p.url);
+            }
             p.activityChecked = true;
             p.checkedAt = Date.now();
             if (result.error) {
