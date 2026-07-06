@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.5.0
+// @version        8.5.1
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -751,17 +751,23 @@
     // Convert image URL to base64 data URL via GM_xmlhttpRequest (bypasses CORS)
     function fetchImageAsBase64(url) {
         if (!url || url.startsWith('data:')) return Promise.resolve(url);
+        if (!url.includes('cdn.fetlife.com')) return Promise.resolve('');
         return new Promise((resolve) => {
             GM_xmlhttpRequest({
                 method: 'GET',
                 url: url,
-                responseType: 'blob',
+                overrideMimeType: 'text/plain; charset=x-user-defined',
                 onload: function(resp) {
                     if (resp.status !== 200) { resolve(''); return; }
-                    const reader = new FileReader();
-                    reader.onloadend = () => resolve(reader.result || '');
-                    reader.onerror = () => resolve('');
-                    reader.readAsDataURL(resp.response);
+                    try {
+                        let binary = '';
+                        for (let i = 0; i < resp.responseText.length; i++) {
+                            binary += String.fromCharCode(resp.responseText.charCodeAt(i) & 0xff);
+                        }
+                        resolve('data:image/jpeg;base64,' + btoa(binary));
+                    } catch(e) {
+                        resolve('');
+                    }
                 },
                 onerror: function() { resolve(''); }
             });
@@ -846,16 +852,12 @@
             const resp = await gmFetch(profileUrl, { 'Accept': 'text/html' });
             if (!resp.ok) return null;
             const html = resp.responseText;
-            let imgUrl = null;
-            const ogMatch = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/);
-            if (ogMatch && ogMatch[1]) imgUrl = ogMatch[1];
-            if (!imgUrl) {
-                const imgMatch = html.match(/<img[^>]+class="[^"]*ipp[^"]*"[^>]+src="([^"]+)"/);
-                if (imgMatch && imgMatch[1]) imgUrl = imgMatch[1];
+            // Look for CDN avatar URLs in the HTML (skip generic og:image)
+            const cdnMatch = html.match(/src="(https:\/\/pic[^"]*cdn\.fetlife\.com[^"]+)"/);
+            if (cdnMatch && cdnMatch[1]) {
+                return await fetchImageAsBase64(cdnMatch[1]);
             }
-            if (!imgUrl) return null;
-            // Convert to base64 so it never expires
-            return await fetchImageAsBase64(imgUrl);
+            return null;
         } catch(e) {
             return null;
         }
