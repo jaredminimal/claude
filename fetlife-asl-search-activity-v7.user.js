@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.7.4
+// @version        8.7.5
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -844,13 +844,28 @@
         });
     }
 
-    // Debug helper: run aslDebugActivity('nickname') in the console to dump
-    // the raw activity JSON so we can inspect its structure.
+    // Debug helper: run aslDebugActivity('nickname') in the console to inspect
+    // BOTH the profile page and the activity feed, so we can see where the
+    // avatar and any "last active" field actually live.
     window.aslDebugActivity = async function(nickname) {
-        const resp = await gmFetch('https://fetlife.com/' + nickname + '/activity', { 'Accept': 'application/json' });
-        console.log('[ASL DEBUG] status:', resp.status);
-        console.log('[ASL DEBUG] first 4000 chars:\n', (resp.responseText || '').substring(0, 4000));
-        return resp.responseText;
+        const out = {};
+        // 1) Profile page HTML
+        const prof = await gmFetch('https://fetlife.com/' + nickname, { 'Accept': 'text/html' });
+        out.profileStatus = prof.status;
+        const html = prof.responseText || '';
+        const cdnInHtml = (html.match(/https:\\?\/\\?\/pic[a-z0-9-]*\.cdn\.fetlife\.com[^"'\\ )]+/gi) || []).slice(0, 5);
+        console.log('[ASL DEBUG] profile page status:', prof.status, 'len:', html.length);
+        console.log('[ASL DEBUG] CDN urls in profile HTML:', cdnInHtml);
+        // look for last-active-ish text
+        const lastActiveHtml = html.match(/last[ _-]?(active|seen|logged)[^<>{}]{0,40}/gi);
+        console.log('[ASL DEBUG] "last active" mentions in profile HTML:', lastActiveHtml ? lastActiveHtml.slice(0,5) : 'none');
+
+        // 2) Activity JSON
+        const act = await gmFetch('https://fetlife.com/' + nickname + '/activity', { 'Accept': 'application/json' });
+        out.activityStatus = act.status;
+        console.log('[ASL DEBUG] activity status:', act.status);
+        console.log('[ASL DEBUG] activity first 2500 chars:\n', (act.responseText || '').substring(0, 2500));
+        return out;
     };
 
     async function fetchActivityDate(profileUrl) {
