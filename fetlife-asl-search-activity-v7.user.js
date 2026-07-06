@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.5.1
+// @version        8.5.2
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -10,6 +10,7 @@
 // @downloadURL    https://raw.githubusercontent.com/jaredminimal/claude/claude/fix-fetlife-rate-limit-uD4Gn/fetlife-asl-search-activity-v7.user.js
 // @grant          GM_xmlhttpRequest
 // @connect        fetlife.com
+// @connect        *.fetlife.com
 // ==/UserScript==
 
 (function () {
@@ -751,26 +752,45 @@
     // Convert image URL to base64 data URL via GM_xmlhttpRequest (bypasses CORS)
     function fetchImageAsBase64(url) {
         if (!url || url.startsWith('data:')) return Promise.resolve(url);
-        if (!url.includes('cdn.fetlife.com')) return Promise.resolve('');
+        if (!url.includes('cdn.fetlife.com')) {
+            console.log('[ASL] Skipping non-CDN URL:', url.substring(0, 60));
+            return Promise.resolve('');
+        }
         return new Promise((resolve) => {
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: url,
-                overrideMimeType: 'text/plain; charset=x-user-defined',
-                onload: function(resp) {
-                    if (resp.status !== 200) { resolve(''); return; }
-                    try {
-                        let binary = '';
-                        for (let i = 0; i < resp.responseText.length; i++) {
-                            binary += String.fromCharCode(resp.responseText.charCodeAt(i) & 0xff);
+            try {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url: url,
+                    responseType: 'arraybuffer',
+                    onload: function(resp) {
+                        console.log('[ASL] Image fetch status:', resp.status, 'size:', resp.response ? resp.response.byteLength : 0);
+                        if (resp.status !== 200 || !resp.response || resp.response.byteLength < 100) {
+                            resolve('');
+                            return;
                         }
-                        resolve('data:image/jpeg;base64,' + btoa(binary));
-                    } catch(e) {
+                        try {
+                            const bytes = new Uint8Array(resp.response);
+                            const chunks = [];
+                            for (let i = 0; i < bytes.length; i += 8192) {
+                                chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 8192, bytes.length))));
+                            }
+                            const b64 = 'data:image/jpeg;base64,' + btoa(chunks.join(''));
+                            console.log('[ASL] Base64 converted, length:', b64.length);
+                            resolve(b64);
+                        } catch(e) {
+                            console.error('[ASL] Base64 conversion error:', e);
+                            resolve('');
+                        }
+                    },
+                    onerror: function(e) {
+                        console.error('[ASL] GM_xmlhttpRequest image error:', e);
                         resolve('');
                     }
-                },
-                onerror: function() { resolve(''); }
-            });
+                });
+            } catch(e) {
+                console.error('[ASL] GM_xmlhttpRequest call failed:', e);
+                resolve('');
+            }
         });
     }
 
