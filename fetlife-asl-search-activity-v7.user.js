@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.7.0
+// @version        8.7.1
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -896,27 +896,71 @@
         return { date: null, error: null };
     }
 
-    async function fetchFreshAvatar(profileUrl) {
-        try {
-            // The /activity endpoint returns real JSON (not a Vue shell) and
-            // contains CDN avatar URLs. Scan the raw text for any CDN image URL.
-            const activityUrl = profileUrl.replace(/\/?$/, '/activity');
-            const resp = await gmFetch(activityUrl, { 'Accept': 'application/json' });
-            if (resp.ok && resp.responseText) {
-                const cdnMatch = resp.responseText.match(/https:\\?\/\\?\/pic[a-z0-9-]*\.cdn\.fetlife\.com[^"'\\ ]+/i);
-                if (cdnMatch) {
-                    // Un-escape any JSON-escaped slashes, then convert to permanent
-                    // base64 (confirmed: data: URIs render fine on FetLife's page)
-                    const cleanUrl = cdnMatch[0].replace(/\\\//g, '/');
-                    console.log('[ASL] Found fresh avatar URL in activity JSON:', cleanUrl.substring(0, 60));
-                    const b64 = await fetchImageAsBase64(cleanUrl);
-                    if (b64) return b64;
-                    // If base64 conversion failed, fall back to the fresh URL
-                    return cleanUrl;
-                }
-                console.log('[ASL] No CDN avatar URL found in activity JSON for', profileUrl);
+    // Find a CDN image URL nested anywhere inside an object
+    function findCdnUrlIn(obj, depth) {
+        if (obj == null || depth > 5) return null;
+        if (typeof obj === 'string') {
+            return /pic[a-z0-9-]*\.cdn\.fetlife\.com/i.test(obj) ? obj : null;
+        }
+        if (typeof obj === 'object') {
+            for (const k in obj) {
+                const r = findCdnUrlIn(obj[k], depth + 1);
+                if (r) return r;
+            }
+        }
+        return null;
+    }
+
+    // Walk the JSON to find the avatar belonging specifically to `nickname`
+    function findAvatarForNickname(obj, nickname, depth) {
+        if (obj == null || depth > 8) return null;
+        if (Array.isArray(obj)) {
+            for (const item of obj) {
+                const r = findAvatarForNickname(item, nickname, depth + 1);
+                if (r) return r;
             }
             return null;
+        }
+        if (typeof obj === 'object') {
+            // Does this object represent the target user?
+            const nn = (obj.nickname || obj.username || obj.slug || '').toString().toLowerCase();
+            if (nn && nn === nickname.toLowerCase()) {
+                const url = findCdnUrlIn(obj, 0);
+                if (url) return url;
+            }
+            for (const k in obj) {
+                const r = findAvatarForNickname(obj[k], nickname, depth + 1);
+                if (r) return r;
+            }
+        }
+        return null;
+    }
+
+    async function fetchFreshAvatar(profileUrl) {
+        try {
+            // The /activity endpoint returns real JSON. It can contain OTHER
+            // users' images (comments, friends' activity), so we must match the
+            // avatar to the profile owner's nickname — never grab the first image.
+            const nickname = profileUrl.replace(/\/+$/, '').split('/').pop();
+            const activityUrl = profileUrl.replace(/\/?$/, '/activity');
+            const resp = await gmFetch(activityUrl, { 'Accept': 'application/json' });
+            if (!resp.ok || !resp.responseText) return null;
+
+            let data;
+            try { data = JSON.parse(resp.responseText); } catch(e) {
+                console.log('[ASL] Activity JSON parse failed for', nickname);
+                return null;
+            }
+
+            const url = findAvatarForNickname(data, nickname, 0);
+            if (!url) {
+                console.log('[ASL] No avatar matched to nickname', nickname, '— leaving existing pic');
+                return null;
+            }
+            const cleanUrl = url.replace(/\\\//g, '/');
+            console.log('[ASL] Matched avatar for', nickname, ':', cleanUrl.substring(0, 60));
+            const b64 = await fetchImageAsBase64(cleanUrl);
+            return b64 || cleanUrl;
         } catch(e) {
             console.error('[ASL] fetchFreshAvatar error:', e);
             return null;
