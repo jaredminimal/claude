@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.9.1
+// @version        8.9.2
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -411,6 +411,7 @@
                     </div>
                     <label class="fl" style="margin:4px 0"><input type="checkbox" id="asl-recheck-skip-pics" checked> Skip profiles that already have a saved pic</label>
                     <button class="asl-b" id="asl-recheck-last" style="background:#d80;color:#fff;margin-top:0">Re-check Range (refresh pics)</button>
+                    <button class="asl-b" id="asl-fix-photos" style="background:#47a;color:#fff;display:none">Refresh Missing Photos</button>
                     <button class="asl-b" id="asl-active-csv" style="background:#2a6;color:#fff">Export Active to CSV</button>
                     <div id="asl-active-count"></div>
                     <div id="asl-active-res"></div>
@@ -455,6 +456,7 @@
         document.getElementById('asl-sort').addEventListener('change', loadAndDisplayResults);
         document.getElementById('asl-active-sort').addEventListener('change', loadAndDisplayResults);
         document.getElementById('asl-active-csv').addEventListener('click', exportActiveCSV);
+        document.getElementById('asl-fix-photos').addEventListener('click', refreshMissingPhotos);
 
         // Load any existing results
         loadAndDisplayResults();
@@ -1120,9 +1122,27 @@
             p.activityError = null;
         }
         await dbPutResults(failed);
-        setStatus('Retrying ' + failed.length + ' failed activity checks...');
+        setStatus('Retrying ' + failed.length + ' failed activity checks (with photo refresh)...');
         await loadAndDisplayResults();
-        setTimeout(() => startActivityCheck(false, failed), 500);
+        // refreshAvatars = true: these profiles usually have stale pics too,
+        // and we're already fetching their activity, so restore both at once.
+        setTimeout(() => startActivityCheck(true, failed), 500);
+    }
+
+    // Re-fetch photos for active profiles that currently show "?" (no saved
+    // base64 pic). Targets exactly the ones missing an image.
+    async function refreshMissingPhotos() {
+        const missing = await getActiveSet(true); // true = only those without a saved pic
+        if (missing.length === 0) {
+            setStatus('All active profiles already have a saved photo.');
+            return;
+        }
+        console.log('[ASL] Refreshing photos for', missing.length, 'active profiles');
+        for (const p of missing) { p.activityChecked = false; p.checkedAt = null; }
+        await dbPutResults(missing);
+        setStatus('Refreshing photos for ' + missing.length + ' active profiles...');
+        await loadAndDisplayResults();
+        setTimeout(() => startActivityCheck(true, missing), 500);
     }
 
     async function recheckByAge() {
@@ -1567,6 +1587,13 @@
         }
         const csvBtn = document.getElementById('asl-csv');
         if (csvBtn) csvBtn.style.display = total ? 'block' : 'none';
+        // Missing-photo button: active profiles with no saved base64 pic
+        const noPicCount = active.filter(p => !(p.avatar && p.avatar.startsWith('data:'))).length;
+        const fixBtn = document.getElementById('asl-fix-photos');
+        if (fixBtn) {
+            fixBtn.style.display = noPicCount > 0 ? 'block' : 'none';
+            fixBtn.textContent = 'Refresh Missing Photos (' + noPicCount + ')';
+        }
         const clearBtn = document.getElementById('asl-clear');
         if (clearBtn) clearBtn.style.display = total ? 'block' : 'none';
 
