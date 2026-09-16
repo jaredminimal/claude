@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.9.2
+// @version        8.9.3
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -1099,7 +1099,7 @@
         cutoff.setDate(cutoff.getDate() - activityDays);
         const results = await dbGetAllResults();
         let active = results.filter(p => p.activityChecked && p.lastActivity && new Date(p.lastActivity) >= cutoff);
-        if (skipWithPics) active = active.filter(p => !(p.avatar && p.avatar.startsWith('data:')));
+        if (skipWithPics) active = active.filter(p => !p.avatar);
         return active;
     }
 
@@ -1132,9 +1132,10 @@
     // Re-fetch photos for active profiles that currently show "?" (no saved
     // base64 pic). Targets exactly the ones missing an image.
     async function refreshMissingPhotos() {
-        const missing = await getActiveSet(true); // true = only those without a saved pic
+        const activeAll = await getActiveSet(false);
+        const missing = activeAll.filter(p => !p.avatar);
         if (missing.length === 0) {
-            setStatus('All active profiles already have a saved photo.');
+            setStatus('All active profiles already have a photo.');
             return;
         }
         console.log('[ASL] Refreshing photos for', missing.length, 'active profiles');
@@ -1473,6 +1474,35 @@
         return sorted;
     }
 
+    // When a stored avatar URL fails to load it has expired. Clear it (batched)
+    // so the "missing photos" count reflects what's actually broken.
+    const brokenAvatarQueue = new Set();
+    let brokenFlushTimer = null;
+    function markAvatarBroken(nickname) {
+        brokenAvatarQueue.add(nickname);
+        if (brokenFlushTimer) clearTimeout(brokenFlushTimer);
+        brokenFlushTimer = setTimeout(async () => {
+            const names = [...brokenAvatarQueue];
+            brokenAvatarQueue.clear();
+            brokenFlushTimer = null;
+            try {
+                const all = await dbGetAllResults();
+                const toClear = all.filter(p => names.includes(p.nickname) && p.avatar);
+                if (toClear.length) {
+                    for (const p of toClear) p.avatar = '';
+                    await dbPutResults(toClear);
+                    console.log('[ASL] Cleared', toClear.length, 'dead avatar URLs');
+                    const fixBtn = document.getElementById('asl-fix-photos');
+                    if (fixBtn) {
+                        const n = parseInt((fixBtn.textContent.match(/\((\d+)\)/) || [])[1] || '0');
+                        fixBtn.textContent = 'Refresh Missing Photos (' + (n + toClear.length) + ')';
+                        fixBtn.style.display = 'block';
+                    }
+                }
+            } catch(e) { console.error('[ASL] markAvatarBroken failed:', e); }
+        }, 1500);
+    }
+
     function buildProfileCard(p, activityDays) {
         const d = document.createElement('div');
         d.className = 'asl-r';
@@ -1485,7 +1515,12 @@
             img.src = p.avatar;
             img.alt = '';
             img.loading = 'lazy';
-            img.addEventListener('error', function() { this.replaceWith(makePlaceholder()); });
+            img.addEventListener('error', function() {
+                this.replaceWith(makePlaceholder());
+                // The stored URL is dead (expired). Clear it so this profile
+                // is correctly counted as "missing a photo".
+                markAvatarBroken(p.nickname);
+            });
             avLink.appendChild(img);
         } else {
             avLink.appendChild(makePlaceholder());
@@ -1587,8 +1622,9 @@
         }
         const csvBtn = document.getElementById('asl-csv');
         if (csvBtn) csvBtn.style.display = total ? 'block' : 'none';
-        // Missing-photo button: active profiles with no saved base64 pic
-        const noPicCount = active.filter(p => !(p.avatar && p.avatar.startsWith('data:'))).length;
+        // Missing-photo button: active profiles with no stored photo at all
+        // (empty, or cleared because the URL was found dead on render)
+        const noPicCount = active.filter(p => !p.avatar).length;
         const fixBtn = document.getElementById('asl-fix-photos');
         if (fixBtn) {
             fixBtn.style.display = noPicCount > 0 ? 'block' : 'none';
