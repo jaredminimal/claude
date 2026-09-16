@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.9.0
+// @version        8.9.1
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -375,6 +375,7 @@
                         <label class="fl" style="margin:0;white-space:nowrap">unchecked</label>
                     </div>
                     <button class="asl-b" id="asl-check-activity">Check Activity Now</button>
+                    <button class="asl-b" id="asl-retry-failed" style="background:#d80;color:#fff;display:none">Retry Failed Checks</button>
                     <button class="asl-b" id="asl-csv">Export All to CSV</button>
                     <button class="asl-b" id="asl-import">Import CSV for Dedup</button>
                     <input type="file" id="asl-import-file" accept=".csv" style="display:none">
@@ -447,6 +448,7 @@
         document.getElementById('asl-import-file').addEventListener('change', importCSVForDedup);
         document.getElementById('asl-clear').addEventListener('click', clearResults);
         document.getElementById('asl-check-activity').addEventListener('click', startActivityCheck);
+        document.getElementById('asl-retry-failed').addEventListener('click', retryFailedChecks);
         document.getElementById('asl-recheck').addEventListener('click', recheckByAge);
         document.getElementById('asl-recheck-last').addEventListener('click', recheckLastN);
         document.getElementById('asl-stop-activity').addEventListener('click', () => { activityCheckAbort = true; });
@@ -1099,6 +1101,30 @@
         return active;
     }
 
+    // Retry profiles whose activity check errored (e.g. 406/429/404).
+    // These are marked "checked" so normal Check Activity skips them, and
+    // they have no activity date so the Active tab can't reach them either.
+    async function retryFailedChecks() {
+        const results = await dbGetAllResults();
+        const failed = results.filter(p => p.activityChecked && p.activityError);
+
+        if (failed.length === 0) {
+            setStatus('No failed checks to retry.');
+            return;
+        }
+
+        console.log('[ASL] Retrying', failed.length, 'failed checks');
+        for (const p of failed) {
+            p.activityChecked = false;
+            p.checkedAt = null;
+            p.activityError = null;
+        }
+        await dbPutResults(failed);
+        setStatus('Retrying ' + failed.length + ' failed activity checks...');
+        await loadAndDisplayResults();
+        setTimeout(() => startActivityCheck(false, failed), 500);
+    }
+
     async function recheckByAge() {
         const minAge = parseInt(document.getElementById('asl-recheck-amin').value) || 18;
         const maxAge = parseInt(document.getElementById('asl-recheck-amax').value) || 99;
@@ -1531,6 +1557,13 @@
         if (checkBtn) {
             checkBtn.style.display = total ? 'block' : 'none';
             checkBtn.textContent = 'Check Activity (' + uncheckedCount + ' unchecked)';
+        }
+        // Retry-failed button: only show when there are errored checks
+        const failedCount = results.filter(p => p.activityChecked && p.activityError).length;
+        const retryBtn = document.getElementById('asl-retry-failed');
+        if (retryBtn) {
+            retryBtn.style.display = failedCount > 0 ? 'block' : 'none';
+            retryBtn.textContent = 'Retry Failed Checks (' + failedCount + ')';
         }
         const csvBtn = document.getElementById('asl-csv');
         if (csvBtn) csvBtn.style.display = total ? 'block' : 'none';
