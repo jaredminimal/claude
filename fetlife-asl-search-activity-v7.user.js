@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.9.3
+// @version        8.10.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -374,6 +374,14 @@
                         <input type="number" id="asl-check-limit" min="1" max="99999" value="5000" style="width:80px;margin:0">
                         <label class="fl" style="margin:0;white-space:nowrap">unchecked</label>
                     </div>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Delay</label>
+                        <input type="number" id="asl-act-min" min="1" max="60" step="0.5" value="3" style="width:60px;margin:0">
+                        <label class="fl" style="margin:0;white-space:nowrap">to</label>
+                        <input type="number" id="asl-act-max" min="1" max="120" step="0.5" value="6" style="width:60px;margin:0">
+                        <label class="fl" style="margin:0;white-space:nowrap">sec / profile</label>
+                    </div>
+                    <p style="font-size:11px;color:#c66;margin:2px 0 6px">Going below ~3s risks a FetLife lockout.</p>
                     <button class="asl-b" id="asl-check-activity">Check Activity Now</button>
                     <button class="asl-b" id="asl-retry-failed" style="background:#d80;color:#fff;display:none">Retry Failed Checks</button>
                     <button class="asl-b" id="asl-csv">Export All to CSV</button>
@@ -897,6 +905,16 @@
         return last;
     }
 
+    // Detect FetLife's "Temporarily Locked Out" page. Continuing to hammer
+    // during a lockout can escalate the next one, so we stop everything.
+    let lockoutDetected = false;
+    function isLockedOut(resp) {
+        if (!resp) return false;
+        if (resp.finalUrl && /\/locked\b/.test(resp.finalUrl)) return true;
+        const t = resp.responseText || '';
+        return t.includes('Temporarily Locked Out') || t.includes("tripped our security system");
+    }
+
     // Debug helper: run aslDebugActivity('nickname') in the console to inspect
     // BOTH the profile page and the activity feed, so we can see where the
     // avatar and any "last active" field actually live.
@@ -947,6 +965,11 @@
             const resp = await fetchActivityRaw(profileUrl);
             const canonical = nicknameFromUrl(resp.finalUrl);
             const origNick = profileUrl.replace(/\/+$/, '').split('/').pop();
+
+            if (isLockedOut(resp)) {
+                lockoutDetected = true;
+                return { date: null, error: 'LOCKED', lockedOut: true, canonical: null };
+            }
 
             if (!resp.ok) {
                 console.log('[ASL] Activity fetch failed:', resp.status, profileUrl);
@@ -1221,6 +1244,7 @@
         }
 
         activityCheckAbort = false;
+        lockoutDetected = false;
         lastCheckBatchTime = Date.now();
         localStorage.setItem('asl_last_check_batch', String(lastCheckBatchTime));
 
@@ -1256,6 +1280,19 @@
             // One request to /activity gives both the date and (in refresh mode)
             // the avatar — avoids the redundant second call that caused rate-limit errors.
             const result = await fetchActivityDate(p.url, refreshAvatars);
+
+            // Hard stop if FetLife locked the account — continuing makes it worse
+            if (result.lockedOut || lockoutDetected) {
+                lockoutDetected = true;
+                activityCheckAbort = true;
+                progressEl.innerHTML = '<strong style="color:#f66">⛔ STOPPED — FetLife temporarily locked your account.</strong><br>' +
+                    'Wait until the lockout expires, then increase the delay before running again. ' +
+                    'Checked ' + (checked - 1) + ' of ' + total + ' before stopping.';
+                setStatus('Stopped: FetLife lockout detected. Wait it out, then slow the delay down.');
+                console.warn('[ASL] LOCKOUT DETECTED — aborting run at profile', p.nickname);
+                break;
+            }
+
             if (refreshAvatars) {
                 // Deliberate refresh: set the verified avatar, or clear it so a
                 // wrong/old pic becomes "?" instead of persisting.
@@ -1299,7 +1336,9 @@
             await dbPutResults([p]);
 
             if (checked < total && !activityCheckAbort) {
-                const delay = randomDelay(1500, 3000);
+                const minS = parseFloat((document.getElementById('asl-act-min') || {}).value) || 3;
+                const maxS = parseFloat((document.getElementById('asl-act-max') || {}).value) || 6;
+                const delay = randomDelay(minS * 1000, Math.max(maxS, minS) * 1000);
                 console.log('[ASL] Next activity check in', Math.round(delay/1000), 'seconds');
                 await sleep(delay);
             }
