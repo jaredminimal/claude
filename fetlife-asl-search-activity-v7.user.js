@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.8.1
+// @version        8.9.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -856,6 +856,43 @@
         });
     }
 
+    // FetLife changes how it negotiates JSON on /activity from time to time
+    // (a 406 means it rejected our Accept header). Try known request shapes,
+    // remember whichever works, and only re-probe if that one starts failing.
+    const ACTIVITY_METHODS = [
+        { suffix: '/activity', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' } },
+        { suffix: '/activity', headers: { 'Accept': 'application/json, text/plain, */*', 'X-Requested-With': 'XMLHttpRequest' } },
+        { suffix: '/activity.json', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' } },
+        { suffix: '/activity.json', headers: { 'Accept': 'application/json' } },
+        { suffix: '/activity', headers: { 'Accept': 'application/json' } },
+    ];
+    let activityMethodIdx = null;
+
+    async function fetchActivityRaw(profileUrl) {
+        const base = profileUrl.replace(/\/+$/, '');
+        // Use the already-resolved method when we have one
+        if (activityMethodIdx !== null) {
+            const m = ACTIVITY_METHODS[activityMethodIdx];
+            const resp = await gmFetch(base + m.suffix, m.headers);
+            if (resp.ok || resp.status !== 406) return resp;
+            console.log('[ASL] Activity method started returning 406 — re-probing...');
+            activityMethodIdx = null;
+        }
+        // Probe each shape until one works, then remember it
+        let last = null;
+        for (let i = 0; i < ACTIVITY_METHODS.length; i++) {
+            const m = ACTIVITY_METHODS[i];
+            const resp = await gmFetch(base + m.suffix, m.headers);
+            last = resp;
+            if (resp.ok && resp.responseText) {
+                activityMethodIdx = i;
+                console.log('[ASL] Activity method resolved:', m.suffix, JSON.stringify(m.headers));
+                return resp;
+            }
+        }
+        return last;
+    }
+
     // Debug helper: run aslDebugActivity('nickname') in the console to inspect
     // BOTH the profile page and the activity feed, so we can see where the
     // avatar and any "last active" field actually live.
@@ -873,11 +910,24 @@
         const lastActiveHtml = html.match(/last[ _-]?(active|seen|logged)[^<>{}]{0,40}/gi);
         console.log('[ASL DEBUG] "last active" mentions in profile HTML:', lastActiveHtml ? lastActiveHtml.slice(0,5) : 'none');
 
-        // 2) Activity JSON
-        const act = await gmFetch('https://fetlife.com/' + nickname + '/activity', { 'Accept': 'application/json' });
-        out.activityStatus = act.status;
-        console.log('[ASL DEBUG] activity status:', act.status);
-        console.log('[ASL DEBUG] activity first 2500 chars:\n', (act.responseText || '').substring(0, 2500));
+        // 2) Probe every activity request shape and report which one works
+        const base = 'https://fetlife.com/' + nickname;
+        for (let i = 0; i < ACTIVITY_METHODS.length; i++) {
+            const m = ACTIVITY_METHODS[i];
+            const r = await gmFetch(base + m.suffix, m.headers);
+            const isJson = (r.responseText || '').trim().startsWith('{');
+            console.log('[ASL DEBUG] method', i, m.suffix, JSON.stringify(m.headers),
+                        '→ status', r.status, '| json:', isJson, '| len:', (r.responseText || '').length);
+            if (r.ok && isJson) {
+                console.log('[ASL DEBUG] ✅ WORKING METHOD', i, '— first 1500 chars:\n', r.responseText.substring(0, 1500));
+                out.workingMethod = i;
+                break;
+            }
+            if (r.status === 406 && r.responseText) {
+                console.log('[ASL DEBUG]    406 body:', r.responseText.substring(0, 200));
+            }
+        }
+        if (out.workingMethod === undefined) console.log('[ASL DEBUG] ❌ No method returned JSON');
         return out;
     };
 
@@ -890,8 +940,7 @@
 
     async function fetchActivityDate(profileUrl, wantAvatar) {
         try {
-            const activityUrl = profileUrl.replace(/\/?$/, '/activity');
-            const resp = await gmFetch(activityUrl, { 'Accept': 'application/json' });
+            const resp = await fetchActivityRaw(profileUrl);
             const canonical = nicknameFromUrl(resp.finalUrl);
             const origNick = profileUrl.replace(/\/+$/, '').split('/').pop();
 
