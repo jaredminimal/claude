@@ -1,11 +1,17 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        7.2.1
+// @version        9.2.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
 // @run-at         document-idle
 // @noframes
+// @updateURL      https://raw.githubusercontent.com/jaredminimal/claude/claude/fix-fetlife-rate-limit-uD4Gn/fetlife-asl-search-activity-v7.user.js
+// @downloadURL    https://raw.githubusercontent.com/jaredminimal/claude/claude/fix-fetlife-rate-limit-uD4Gn/fetlife-asl-search-activity-v7.user.js
+// @grant          GM_xmlhttpRequest
+// @grant          unsafeWindow
+// @connect        fetlife.com
+// @connect        *.fetlife.com
 // ==/UserScript==
 
 (function () {
@@ -29,8 +35,172 @@
     //
 
     const STORAGE_KEY = 'asl_search_state';
-    const RESULTS_KEY = 'asl_search_results';
     const PROGRESS_KEY = 'asl_search_progress';
+    const DB_NAME = 'asl_search_db';
+    const DB_VERSION = 2;
+    const STORE_NAME = 'results';
+    const SEEN_STORE = 'seen';
+
+    // =====================
+    // IndexedDB STORAGE (replaces localStorage for results)
+    // =====================
+    function openDB() {
+        return new Promise((resolve, reject) => {
+            const req = indexedDB.open(DB_NAME, DB_VERSION);
+            req.onupgradeneeded = (e) => {
+                const db = e.target.result;
+                if (!db.objectStoreNames.contains(STORE_NAME)) {
+                    db.createObjectStore(STORE_NAME, { keyPath: 'nickname' });
+                }
+                if (!db.objectStoreNames.contains(SEEN_STORE)) {
+                    db.createObjectStore(SEEN_STORE, { keyPath: 'nickname' });
+                }
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbGetAllResults() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readonly');
+            const store = tx.objectStore(STORE_NAME);
+            const req = store.getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbGetResult(nickname) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readonly');
+            const req = tx.objectStore(STORE_NAME).get(nickname);
+            req.onsuccess = () => resolve(req.result || null);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbGetNicknames() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readonly');
+            const store = tx.objectStore(STORE_NAME);
+            const req = store.getAllKeys();
+            req.onsuccess = () => resolve(new Set(req.result || []));
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbPutResults(results) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            const store = tx.objectStore(STORE_NAME);
+            for (const r of results) {
+                store.put(r);
+            }
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async function dbDelete(nickname) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            tx.objectStore(STORE_NAME).delete(nickname);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async function dbClearResults() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            const store = tx.objectStore(STORE_NAME);
+            const req = store.clear();
+            req.onsuccess = () => resolve();
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbGetCount() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readonly');
+            const store = tx.objectStore(STORE_NAME);
+            const req = store.count();
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    // Seen nicknames — for dedup across sessions
+    async function dbGetSeenNicknames() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(SEEN_STORE, 'readonly');
+            const store = tx.objectStore(SEEN_STORE);
+            const req = store.getAllKeys();
+            req.onsuccess = () => resolve(new Set(req.result || []));
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbAddSeenNicknames(nicknames) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(SEEN_STORE, 'readwrite');
+            const store = tx.objectStore(SEEN_STORE);
+            for (const n of nicknames) {
+                store.put({ nickname: n });
+            }
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async function dbGetSeenCount() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(SEEN_STORE, 'readonly');
+            const store = tx.objectStore(SEEN_STORE);
+            const req = store.count();
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbClearSeen() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(SEEN_STORE, 'readwrite');
+            const store = tx.objectStore(SEEN_STORE);
+            const req = store.clear();
+            req.onsuccess = () => resolve();
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    // Migrate old localStorage results to IndexedDB (one-time)
+    async function migrateFromLocalStorage() {
+        try {
+            const old = localStorage.getItem('asl_search_results');
+            if (!old) return;
+            const results = JSON.parse(old);
+            if (results && results.length > 0) {
+                console.log('[ASL] Migrating', results.length, 'results from localStorage to IndexedDB...');
+                await dbPutResults(results);
+                localStorage.removeItem('asl_search_results');
+                console.log('[ASL] Migration complete.');
+            }
+        } catch(e) {
+            console.error('[ASL] Migration error:', e);
+        }
+    }
 
     // Gender codes used by FetLife
     const GENDERS = [
@@ -72,7 +242,7 @@
 
     // Phase 2 state
     let activityCheckAbort = false;
-    let refreshAbort = false;
+    let lastCheckBatchTime = parseInt(localStorage.getItem('asl_last_check_batch') || '0');
 
     // =====================
     // STYLES
@@ -103,7 +273,7 @@
         #asl-stop{background:#d93;color:#fff;margin-top:6px;display:none}
         #asl-clear{background:#555;color:#fff;margin-top:6px;display:none}
         #asl-csv{background:#2a6;color:#fff;margin-top:6px;display:none}#asl-csv:hover{background:#3b7}
-        #asl-refresh{background:#47a;color:#fff;margin-top:6px;display:none}#asl-refresh:hover{background:#58b}
+        #asl-load-more{background:#47a;color:#fff;margin-top:6px;cursor:pointer}#asl-load-more:hover{background:#58b}
         #asl-status{margin-top:8px;padding:8px 10px;background:#16213e;border-radius:6px;font-size:13px;color:#ccc;display:none;word-break:break-word}
         #asl-rcount{margin:8px 0 4px;font-size:12px;color:#888}
         #asl-res{margin-top:4px}
@@ -131,6 +301,8 @@
         #asl-activity-progress{margin-top:8px;padding:8px 10px;background:#16213e;border-radius:6px;font-size:13px;color:#ccc;display:none;word-break:break-word}
         #asl-activity-progress .bar{height:4px;background:#333;border-radius:2px;margin-top:6px;overflow:hidden}
         #asl-activity-progress .bar .fill{height:100%;background:#c22;border-radius:2px;transition:width .3s}
+        #asl-import{background:#47a;color:#fff;margin-top:6px}#asl-import:hover{background:#58b}
+        #asl-seen-count{font-size:11px;color:#888;margin-top:4px}
         #asl-check-activity{background:#d80;color:#fff;margin-top:6px;display:none}#asl-check-activity:hover{background:#e91}
         #asl-stop-activity{background:#d93;color:#fff;margin-top:6px;display:none}
     `;
@@ -153,7 +325,10 @@
                 <div id="asl-tabs">
                     <button class="on" data-t="search">Search</button>
                     <button data-t="results">Results <span id="asl-rtab-count"></span></button>
+                    <button data-t="active">Active <span id="asl-atab-count"></span></button>
                 </div>
+                <div id="asl-activity-progress"></div>
+                <button class="asl-b" id="asl-stop-activity" style="display:none">Stop Activity Check</button>
                 <div class="asl-tab on" id="asl-t-search">
                     <div class="sec">Step 1: Go to a Kinksters Page</div>
                     <p style="font-size:12px;color:#999;margin:0 0 10px">
@@ -185,36 +360,87 @@
                         <option value="365">Last year</option>
                     </select>
                     <div class="sec">Step 4: Speed &amp; Limits</div>
-                    <label class="fl">Delay between pages: <span id="asl-dl">3</span>s</label>
-                    <input type="range" id="asl-spd" min="3" max="20" value="3" step="1">
+                    <label class="fl">Delay between pages: <span id="asl-dl">1.5</span>s</label>
+                    <input type="range" id="asl-spd" min="1" max="20" value="1.5" step="0.5">
                     <label class="fl">Pages to search</label>
-                    <input type="number" id="asl-mp" min="1" max="2000" value="100">
+                    <input type="number" id="asl-mp" min="1" max="5000" value="500">
                     <button class="asl-b" id="asl-go">Start Search</button>
                     <div id="asl-status"></div>
                 </div>
                 <div class="asl-tab" id="asl-t-results">
+                    <p style="font-size:12px;color:#999;margin:0 0 8px">Every profile found across your searches. Run an activity check to move active ones into the Active tab.</p>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Sort by</label>
                         <select id="asl-sort" style="width:auto;margin:0">
-                            <option value="newest">Newest first</option>
+                            <option value="newest" selected>Newest first</option>
+                            <option value="activity">Last active</option>
                             <option value="age-asc">Age (youngest)</option>
                             <option value="age-desc">Age (oldest)</option>
-                            <option value="activity">Last active</option>
+                            <option value="checked">Recently checked</option>
                         </select>
                     </div>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Find</label>
+                        <input type="search" id="asl-find" placeholder="type a name…" style="margin:0;flex:1">
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Check last</label>
-                        <input type="number" id="asl-check-limit" min="1" max="9999" value="1000" style="width:70px;margin:0">
+                        <input type="number" id="asl-check-limit" min="1" max="99999" value="5000" style="width:80px;margin:0">
                         <label class="fl" style="margin:0;white-space:nowrap">unchecked</label>
                     </div>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Delay</label>
+                        <input type="number" id="asl-act-min" min="1" max="60" step="0.5" value="3" style="width:60px;margin:0">
+                        <label class="fl" style="margin:0;white-space:nowrap">to</label>
+                        <input type="number" id="asl-act-max" min="1" max="120" step="0.5" value="6" style="width:60px;margin:0">
+                        <label class="fl" style="margin:0;white-space:nowrap">sec / profile</label>
+                    </div>
+                    <p style="font-size:11px;color:#c66;margin:2px 0 6px">Going below ~3s risks a FetLife lockout.</p>
                     <button class="asl-b" id="asl-check-activity">Check Activity Now</button>
-                    <button class="asl-b" id="asl-stop-activity">Stop Activity Check</button>
-                    <div id="asl-activity-progress"></div>
-                    <button class="asl-b" id="asl-csv">Export to CSV</button>
-                    <button class="asl-b" id="asl-refresh">Refresh Images</button>
+                    <button class="asl-b" id="asl-retry-failed" style="background:#d80;color:#fff;display:none">Retry Failed Checks</button>
+                    <button class="asl-b" id="asl-csv">Export All to CSV</button>
+                    <button class="asl-b" id="asl-import">Import CSV for Dedup</button>
+                    <input type="file" id="asl-import-file" accept=".csv" style="display:none">
+                    <div id="asl-seen-count"></div>
                     <button class="asl-b" id="asl-clear">Clear All Results</button>
                     <div id="asl-rcount"></div>
                     <div id="asl-res"></div>
+                </div>
+                <div class="asl-tab" id="asl-t-active">
+                    <p style="font-size:12px;color:#999;margin:0 0 8px">Profiles confirmed active within your threshold. Re-check to refresh their activity &amp; photos.</p>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Sort by</label>
+                        <select id="asl-active-sort" style="width:auto;margin:0">
+                            <option value="newest" selected>Newest first</option>
+                            <option value="activity">Last active</option>
+                            <option value="age-asc">Age (youngest)</option>
+                            <option value="age-desc">Age (oldest)</option>
+                            <option value="checked">Recently checked</option>
+                        </select>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Find</label>
+                        <input type="search" id="asl-active-find" placeholder="type a name…" style="margin:0;flex:1">
+                    </div>
+                    <div class="sec">Re-check by Age</div>
+                    <div class="row">
+                        <div><label class="fl">Min Age</label><input type="number" id="asl-recheck-amin" min="18" max="200" value="18" style="margin-bottom:4px"></div>
+                        <div><label class="fl">Max Age</label><input type="number" id="asl-recheck-amax" min="18" max="200" value="99" style="margin-bottom:4px"></div>
+                    </div>
+                    <button class="asl-b" id="asl-recheck" style="background:#d80;color:#fff;margin-top:0">Re-check by Age</button>
+                    <div class="sec">Re-check by Range</div>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <label class="fl" style="margin:0;white-space:nowrap">Active #</label>
+                        <input type="number" id="asl-recheck-from" min="1" max="99999" value="1" style="width:70px;margin:0">
+                        <label class="fl" style="margin:0;white-space:nowrap">to</label>
+                        <input type="number" id="asl-recheck-to" min="1" max="99999" value="500" style="width:70px;margin:0">
+                    </div>
+                    <label class="fl" style="margin:4px 0"><input type="checkbox" id="asl-recheck-skip-pics" checked> Skip profiles that already have a saved pic</label>
+                    <button class="asl-b" id="asl-recheck-last" style="background:#d80;color:#fff;margin-top:0">Re-check Range (refresh pics)</button>
+                    <button class="asl-b" id="asl-active-csv" style="background:#2a6;color:#fff">Export Active to CSV</button>
+                    <div id="asl-photo-status" style="font-size:11px;color:#89a;margin:4px 0"></div>
+                    <div id="asl-active-count"></div>
+                    <div id="asl-active-res"></div>
                 </div>
             </div>
         `;
@@ -245,14 +471,28 @@
 
         document.getElementById('asl-go').addEventListener('click', startNewSearch);
         document.getElementById('asl-csv').addEventListener('click', exportCSV);
-        document.getElementById('asl-refresh').addEventListener('click', refreshAvatars);
+        document.getElementById('asl-import').addEventListener('click', () => document.getElementById('asl-import-file').click());
+        document.getElementById('asl-import-file').addEventListener('change', importCSVForDedup);
         document.getElementById('asl-clear').addEventListener('click', clearResults);
         document.getElementById('asl-check-activity').addEventListener('click', startActivityCheck);
-        document.getElementById('asl-stop-activity').addEventListener('click', () => { activityCheckAbort = true; refreshAbort = true; });
+        document.getElementById('asl-retry-failed').addEventListener('click', retryFailedChecks);
+        document.getElementById('asl-recheck').addEventListener('click', recheckByAge);
+        document.getElementById('asl-recheck-last').addEventListener('click', recheckLastN);
+        document.getElementById('asl-stop-activity').addEventListener('click', () => { activityCheckAbort = true; });
         document.getElementById('asl-sort').addEventListener('change', loadAndDisplayResults);
+        document.getElementById('asl-active-sort').addEventListener('change', loadAndDisplayResults);
+        document.getElementById('asl-active-csv').addEventListener('click', exportActiveCSV);
+        let findTimer = null;
+        for (const id of ['asl-find', 'asl-active-find']) {
+            document.getElementById(id).addEventListener('input', () => {
+                clearTimeout(findTimer);
+                findTimer = setTimeout(loadAndDisplayResults, 200);
+            });
+        }
 
         // Load any existing results
         loadAndDisplayResults();
+        updateSeenCount();
     }
 
     function helpers(cgId, shId) {
@@ -297,14 +537,6 @@
         localStorage.removeItem(STORAGE_KEY);
     }
 
-    function getSavedResults() {
-        try { return JSON.parse(localStorage.getItem(RESULTS_KEY)) || []; } catch(e) { return []; }
-    }
-
-    function saveResults(results) {
-        localStorage.setItem(RESULTS_KEY, JSON.stringify(results));
-    }
-
     function getProgress() {
         try { return JSON.parse(localStorage.getItem(PROGRESS_KEY)) || { lastPageCrawled: 0, batchCount: 0 }; }
         catch(e) { return { lastPageCrawled: 0, batchCount: 0 }; }
@@ -314,22 +546,27 @@
         localStorage.setItem(PROGRESS_KEY, JSON.stringify(prog));
     }
 
-    function clearResults() {
-        localStorage.removeItem(RESULTS_KEY);
+    async function clearResults() {
+        if (!confirm('Clear ALL results? This cannot be undone. (Your "seen" dedup list is kept.)')) return;
+        await dbClearResults();
         localStorage.removeItem(PROGRESS_KEY);
-        document.getElementById('asl-res').innerHTML = '';
-        document.getElementById('asl-rcount').textContent = '';
-        document.getElementById('asl-csv').style.display = 'none';
-        document.getElementById('asl-clear').style.display = 'none';
-        document.getElementById('asl-check-activity').style.display = 'none';
-        document.getElementById('asl-rtab-count').textContent = '';
         setStatus('Results cleared.');
+        await loadAndDisplayResults();
     }
 
     // =====================
     // START A NEW SEARCH
     // =====================
     function startNewSearch() {
+        // Force-clear any stuck search state
+        const old = getSavedState();
+        if (old && old.active) {
+            old.active = false;
+            saveState(old);
+            if (window._aslNavTimer) { clearTimeout(window._aslNavTimer); window._aslNavTimer = null; }
+            removeCrawlBanner();
+        }
+
         const loc = window.location.href.split('?')[0].split('#')[0];
         let baseURL = null;
 
@@ -346,7 +583,7 @@
             return;
         }
 
-        const pagesToSearch = parseInt(document.getElementById('asl-mp').value) || 100;
+        const pagesToSearch = parseInt(document.getElementById('asl-mp').value) || 500;
         const params = {
             ageMin: parseInt(document.getElementById('asl-amin').value) || 18,
             ageMax: parseInt(document.getElementById('asl-amax').value) || 200,
@@ -354,7 +591,7 @@
             roleFilterEnabled: document.getElementById('asl-role-toggle').checked,
             roles: [...document.querySelectorAll('#asl-r input:checked')].map(c => c.value),
             locFilter: document.getElementById('asl-loc').value.trim().toLowerCase(),
-            delay: (parseInt(document.getElementById('asl-spd').value) || 3) * 1000,
+            delay: (parseFloat(document.getElementById('asl-spd').value) || 1.5) * 1000,
             activityDays: parseInt(document.getElementById('asl-activity').value) || 0,
         };
 
@@ -414,7 +651,7 @@
         const pageNum = getCurrentPageNumber();
         console.log('[ASL] Scraping page', pageNum);
 
-        waitForCards(function(cards) {
+        waitForCards(async function(cards) {
             const profiles = [];
             for (const card of cards) {
                 const p = parseCard(card);
@@ -434,21 +671,34 @@
                 return;
             }
 
-            const results = getSavedResults();
-            const existing = new Set(results.map(r => r.nickname));
+            const existing = await dbGetNicknames();
+            const seen = await dbGetSeenNicknames();
             const params = s.params;
-            let newMatches = 0;
+            const newResults = [];
+            const now = Date.now();
+            let idx = 0;
             for (const p of profiles) {
                 s.scanned++;
-                if (matchesFilter(p, params) && !existing.has(p.nickname)) {
+                if (matchesFilter(p, params) && !existing.has(p.nickname) && !seen.has(p.nickname)) {
                     p.batch = s.batch;
                     p.batchPages = s.startPage + '-' + s.endPage;
-                    results.push(p);
+                    p.foundAt = now + idx++; // Preserve page order within same timestamp
+                    newResults.push(p);
                     existing.add(p.nickname);
-                    newMatches++;
                 }
             }
-            saveResults(results);
+            if (newResults.length > 0) {
+                // Convert avatar URLs to base64 so they never expire
+                await Promise.all(newResults.map(async (p) => {
+                    if (p.avatar && !p.avatar.startsWith('data:')) {
+                        const b64 = await fetchImageAsBase64(p.avatar);
+                        if (b64) p.avatar = b64;
+                    }
+                }));
+                await dbPutResults(newResults);
+                await dbAddSeenNicknames(newResults.map(r => r.nickname));
+            }
+            const totalCount = await dbGetCount();
 
             s.currentPage = pageNum + 1;
             saveState(s);
@@ -456,8 +706,8 @@
             prog.lastPageCrawled = pageNum;
             saveProgress(prog);
 
-            updateCrawlBanner(s, results.length, pageNum);
-            console.log('[ASL] Page', pageNum, ':', newMatches, 'new matches.', results.length, 'total matches.', s.scanned, 'scanned.');
+            updateCrawlBanner(s, totalCount, pageNum);
+            console.log('[ASL] Page', pageNum, ':', newResults.length, 'new matches.', totalCount, 'total matches.', s.scanned, 'scanned.');
 
             if (pageNum >= s.endPage) {
                 s.active = false;
@@ -469,25 +719,27 @@
 
             const nextURL = s.baseURL + '?page=' + (pageNum + 1);
             console.log('[ASL] Next page in', s.params.delay/1000, 'seconds:', nextURL);
-            setTimeout(() => {
+            window._aslNavTimer = setTimeout(() => {
                 window.location.href = nextURL;
             }, s.params.delay);
         });
     }
 
     // Called when Phase 1 (page crawling) finishes
-    function onPhase1Complete(s) {
-        const results = getSavedResults();
+    async function onPhase1Complete(s) {
+        const totalCount = await dbGetCount();
         const activityDays = s.params ? s.params.activityDays : 0;
 
-        if (activityDays > 0 && results.length > 0) {
-            // Automatically start Phase 2
-            setStatus('Phase 1 done — ' + results.length + ' matches from ' + s.scanned + ' scanned. Starting activity check...');
-            loadAndDisplayResults();
+        // Land on the Results tab now that the search is done
+        document.querySelector('#asl-tabs button[data-t="results"]')?.click();
+
+        if (activityDays > 0 && totalCount > 0) {
+            setStatus('Phase 1 done — ' + totalCount + ' matches from ' + s.scanned + ' scanned. Starting activity check...');
+            await loadAndDisplayResults();
             setTimeout(() => startActivityCheck(), 1500);
         } else {
-            setStatus('Done! ' + results.length + ' matches from ' + s.scanned + ' profiles scanned.');
-            loadAndDisplayResults();
+            setStatus('Done! ' + totalCount + ' matches from ' + s.scanned + ' profiles scanned.');
+            await loadAndDisplayResults();
         }
     }
 
@@ -521,13 +773,14 @@
     // =====================
     // CRAWL BANNER
     // =====================
-    function showCrawlBanner(s) {
+    async function showCrawlBanner(s) {
         removeCrawlBanner();
+        const count = await dbGetCount();
         const banner = document.createElement('div');
         banner.className = 'asl-crawl-banner';
         banner.id = 'asl-crawl-banner';
         banner.innerHTML = `
-            <span id="asl-banner-text">ASL Search ${s.batch || ''} — Page ${getCurrentPageNumber()} of ${s.startPage || '?'}-${s.endPage || '?'} — ${getSavedResults().length} matches so far...</span>
+            <span id="asl-banner-text">ASL Search ${s.batch || ''} — Page ${getCurrentPageNumber()} of ${s.startPage || '?'}-${s.endPage || '?'} — ${count} matches so far...</span>
             <button id="asl-banner-stop">Stop Search</button>
         `;
         document.body.prepend(banner);
@@ -546,7 +799,8 @@
         if (el) el.remove();
     }
 
-    function stopCrawl() {
+    async function stopCrawl() {
+        if (window._aslNavTimer) { clearTimeout(window._aslNavTimer); window._aslNavTimer = null; }
         const s = getSavedState();
         if (s) {
             s.active = false;
@@ -557,7 +811,7 @@
         }
         removeCrawlBanner();
         console.log('[ASL] Search stopped by user.');
-        loadAndDisplayResults();
+        await loadAndDisplayResults();
     }
 
     // =====================
@@ -571,28 +825,391 @@
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    async function fetchActivityDate(profileUrl) {
-        try {
-            // Use FetLife's JSON API: /{nickname}/activity returns activity feed JSON
-            // with story_groups[].stories[].created_at timestamps.
-            // This works reliably unlike HTML scraping (FetLife is a Vue SPA that
-            // returns empty shells for HTML fetches).
-            const activityUrl = profileUrl.replace(/\/?$/, '/activity');
-            const resp = await fetch(activityUrl, {
-                credentials: 'same-origin',
-                headers: {
-                    'Accept': 'application/json',
+    // Any FetLife-hosted image, whatever CDN subdomain it sits on. Older pics
+    // are on pic*.cdn.fetlife.com, newer ones on flpics*.cdn.fetlife.com, and
+    // og:image tags sometimes point at another host again — so match on the
+    // domain, not on a guessed subdomain prefix.
+    const FL_IMG_HOST = /https?:\/\/[a-z0-9.-]*fetlife\.com\//i;
+
+    // Convert image URL to base64 data URL via GM_xmlhttpRequest (bypasses CORS).
+    // The CDN checks the referrer — a plain GM_xmlhttpRequest sends none and gets
+    // a 403, which is why in-page <img> tags load fine but our copies came back
+    // empty. Send the same Referer the browser would.
+    function fetchImageAsBase64(url, trace) {
+        const note = m => { if (trace) trace.push(m); };
+        if (!url || url.startsWith('data:')) return Promise.resolve(url);
+        if (!FL_IMG_HOST.test(url)) {
+            console.log('[ASL] Skipping non-FetLife URL:', url.substring(0, 60));
+            note('Skipped: not a FetLife image host');
+            return Promise.resolve('');
+        }
+        return new Promise((resolve) => {
+            try {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url: url,
+                    responseType: 'arraybuffer',
+                    headers: {
+                        'Referer': 'https://fetlife.com/',
+                        'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+                    },
+                    onload: function(resp) {
+                        const size = resp.response ? resp.response.byteLength : 0;
+                        console.log('[ASL] Image fetch status:', resp.status, 'size:', size);
+                        note('Download: HTTP ' + resp.status + ', ' + size + ' bytes');
+                        if (resp.status !== 200 || !resp.response || size < 100) {
+                            resolve('');
+                            return;
+                        }
+                        try {
+                            const bytes = new Uint8Array(resp.response);
+                            const chunks = [];
+                            for (let i = 0; i < bytes.length; i += 8192) {
+                                chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 8192, bytes.length))));
+                            }
+                            const b64 = 'data:' + sniffImageType(bytes) + ';base64,' + btoa(chunks.join(''));
+                            console.log('[ASL] Base64 converted, length:', b64.length);
+                            note('Converted to a saved image (' + Math.round(b64.length / 1024) + ' KB)');
+                            resolve(b64);
+                        } catch(e) {
+                            console.error('[ASL] Base64 conversion error:', e);
+                            note('Conversion failed: ' + e.message);
+                            resolve('');
+                        }
+                    },
+                    onerror: function(e) {
+                        console.error('[ASL] GM_xmlhttpRequest image error:', e);
+                        note('Download failed (network/blocked)');
+                        resolve('');
+                    }
+                });
+            } catch(e) {
+                console.error('[ASL] GM_xmlhttpRequest call failed:', e);
+                note('Download call failed: ' + e.message);
+                resolve('');
+            }
+        });
+    }
+
+    // Label the data: URI correctly — FetLife serves webp and png as well as
+    // jpeg, and a wrong label makes the browser refuse to render it.
+    function sniffImageType(bytes) {
+        if (bytes[0] === 0x89 && bytes[1] === 0x50) return 'image/png';
+        if (bytes[0] === 0x47 && bytes[1] === 0x49) return 'image/gif';
+        if (bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42) return 'image/webp';
+        return 'image/jpeg';
+    }
+
+    // GM_xmlhttpRequest wrapper — bypasses FetLife's service worker
+    function gmFetch(url, headers) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: url,
+                headers: headers || {},
+                onload: function(resp) {
+                    resolve({
+                        ok: resp.status >= 200 && resp.status < 300,
+                        status: resp.status,
+                        responseText: resp.responseText,
+                        finalUrl: resp.finalUrl || url,
+                    });
+                },
+                onerror: function(err) {
+                    reject(err);
                 }
             });
+        });
+    }
+
+    // FetLife changes how it negotiates JSON on /activity from time to time
+    // (a 406 means it rejected our Accept header). Try known request shapes,
+    // remember whichever works, and only re-probe if that one starts failing.
+    const ACTIVITY_METHODS = [
+        { suffix: '/activity', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' } },
+        { suffix: '/activity', headers: { 'Accept': 'application/json, text/plain, */*', 'X-Requested-With': 'XMLHttpRequest' } },
+        { suffix: '/activity.json', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' } },
+        { suffix: '/activity.json', headers: { 'Accept': 'application/json' } },
+        { suffix: '/activity', headers: { 'Accept': 'application/json' } },
+    ];
+    let activityMethodIdx = null;
+
+    async function fetchActivityRaw(profileUrl) {
+        const base = profileUrl.replace(/\/+$/, '');
+        // Use the already-resolved method when we have one
+        if (activityMethodIdx !== null) {
+            const m = ACTIVITY_METHODS[activityMethodIdx];
+            const resp = await gmFetch(base + m.suffix, m.headers);
+            if (resp.ok || resp.status !== 406) return resp;
+            console.log('[ASL] Activity method started returning 406 — re-probing...');
+            activityMethodIdx = null;
+        }
+        // Probe each shape until one works, then remember it
+        let last = null;
+        for (let i = 0; i < ACTIVITY_METHODS.length; i++) {
+            const m = ACTIVITY_METHODS[i];
+            const resp = await gmFetch(base + m.suffix, m.headers);
+            last = resp;
+            if (resp.ok && resp.responseText) {
+                activityMethodIdx = i;
+                console.log('[ASL] Activity method resolved:', m.suffix, JSON.stringify(m.headers));
+                return resp;
+            }
+        }
+        return last;
+    }
+
+    // Detect FetLife's "Temporarily Locked Out" page. Continuing to hammer
+    // during a lockout can escalate the next one, so we stop everything.
+    let lockoutDetected = false;
+    function isLockedOut(resp) {
+        if (!resp) return false;
+        if (resp.finalUrl && /\/locked\b/.test(resp.finalUrl)) return true;
+        const t = resp.responseText || '';
+        return t.includes('Temporarily Locked Out') || t.includes("tripped our security system");
+    }
+
+    // Debug helper: run aslDebugActivity('nickname') in the console to inspect
+    // BOTH the profile page and the activity feed, so we can see where the
+    // avatar and any "last active" field actually live.
+    const dbgTarget = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+    dbgTarget.aslDebugActivity = async function(nickname) {
+        const out = {};
+        // 1) Profile page HTML
+        const prof = await gmFetch('https://fetlife.com/' + nickname, { 'Accept': 'text/html' });
+        out.profileStatus = prof.status;
+        const html = prof.responseText || '';
+        const cdnInHtml = (html.match(/https:\\?\/\\?\/pic[a-z0-9-]*\.cdn\.fetlife\.com[^"'\\ )]+/gi) || []).slice(0, 5);
+        console.log('[ASL DEBUG] profile page status:', prof.status, 'len:', html.length);
+        console.log('[ASL DEBUG] CDN urls in profile HTML:', cdnInHtml);
+        // look for last-active-ish text
+        const lastActiveHtml = html.match(/last[ _-]?(active|seen|logged)[^<>{}]{0,40}/gi);
+        console.log('[ASL DEBUG] "last active" mentions in profile HTML:', lastActiveHtml ? lastActiveHtml.slice(0,5) : 'none');
+
+        // 2) Probe every activity request shape and report which one works
+        const base = 'https://fetlife.com/' + nickname;
+        for (let i = 0; i < ACTIVITY_METHODS.length; i++) {
+            const m = ACTIVITY_METHODS[i];
+            const r = await gmFetch(base + m.suffix, m.headers);
+            const isJson = (r.responseText || '').trim().startsWith('{');
+            console.log('[ASL DEBUG] method', i, m.suffix, JSON.stringify(m.headers),
+                        '→ status', r.status, '| json:', isJson, '| len:', (r.responseText || '').length);
+            if (r.ok && isJson) {
+                console.log('[ASL DEBUG] ✅ WORKING METHOD', i, '— first 1500 chars:\n', r.responseText.substring(0, 1500));
+                out.workingMethod = i;
+                break;
+            }
+            if (r.status === 406 && r.responseText) {
+                console.log('[ASL DEBUG]    406 body:', r.responseText.substring(0, 200));
+            }
+        }
+        if (out.workingMethod === undefined) console.log('[ASL DEBUG] ❌ No method returned JSON');
+        return out;
+    };
+
+    // Derive the current nickname from a (possibly redirected) URL
+    function nicknameFromUrl(url) {
+        if (!url) return null;
+        const m = url.replace(/[?#].*$/, '').replace(/\/activity\/?$/, '').match(/fetlife\.com\/([^\/]+)/i);
+        return m ? m[1] : null;
+    }
+
+    // Pull the avatar straight from the profile page HTML. The activity feed
+    // only carries an avatar when the person authored a recent story, so many
+    // profiles come back empty there — the profile page always shows their pic.
+    // Unescape a URL as it appears inside HTML or an embedded JSON blob.
+    function cleanImgUrl(u) {
+        return u.replace(/\\u0026/gi, '&').replace(/\\\//g, '/')
+                .replace(/&amp;/g, '&').replace(/&#(?:38|x26);/gi, '&');
+    }
+
+    // Member pictures are served from the CDN hosts. Anything under
+    // fetlife.com/assets/ is site furniture — the header logo, the default
+    // "no picture" silhouette, the og:image share card. Taking those gives
+    // every profile the same meaningless thumbnail, so they are never avatars.
+    const FL_CDN_HOST = /^https?:\/\/[a-z0-9.-]*cdn\.fetlife\.com\//i;
+    const FL_SITE_ASSET = /\/assets\/|\/packs\/|og-image|sprite|favicon|logo|default[-_]?(avatar|pic)|missing/i;
+
+    function isMemberPicture(url) {
+        return FL_CDN_HOST.test(url) && !FL_SITE_ASSET.test(url);
+    }
+
+    // One picture is stored once and served at several sizes, all sharing an
+    // attachment id: .../attachments/177312342/a50.jpg, a160.jpg, a400.jpg.
+    // Grouping by that id is what tells two people's photos apart on a page.
+    function attachmentId(url) {
+        const m = url.match(/\/attachments\/(\d+)\//);
+        return m ? m[1] : null;
+    }
+
+    // Every FetLife page carries YOUR avatar in the site header, so it shows up
+    // in every profile page fetched in the background — and it is the first
+    // picture in the markup, which is how it ended up being saved onto other
+    // people's profiles. A picture belongs to one person, so any attachment id
+    // seen on a second person's page is site chrome, and is remembered as such.
+    const CHROME_IDS_KEY = 'asl_chrome_pic_ids';
+    const ID_OWNER_KEY = 'asl_pic_id_owner';
+
+    function readJson(key, dflt) {
+        try { return JSON.parse(localStorage.getItem(key)) || dflt; } catch(e) { return dflt; }
+    }
+    function writeJson(key, val) {
+        try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {}
+    }
+
+    function learnChromeIds(nickname, ids) {
+        const owner = readJson(ID_OWNER_KEY, {});
+        const chrome = new Set(readJson(CHROME_IDS_KEY, []));
+        let changed = false;
+        for (const id of ids) {
+            if (chrome.has(id)) continue;
+            if (!owner[id]) { owner[id] = nickname; changed = true; }
+            else if (owner[id] !== nickname) { chrome.add(id); delete owner[id]; changed = true; }
+        }
+        if (changed) { writeJson(ID_OWNER_KEY, owner); writeJson(CHROME_IDS_KEY, [...chrome]); }
+        return chrome;
+    }
+
+    // Seed the chrome list straight from the page we are running on, so the
+    // very first lookup is already right instead of learning after two fetches.
+    function seedChromeFromHeader() {
+        const scope = document.querySelector('header, nav, [role="banner"]');
+        if (!scope) return;
+        const chrome = new Set(readJson(CHROME_IDS_KEY, []));
+        let changed = false;
+        scope.querySelectorAll('img[src*="cdn.fetlife.com"]').forEach(img => {
+            const id = attachmentId(img.src);
+            if (id && !chrome.has(id)) { chrome.add(id); changed = true; }
+        });
+        if (changed) writeJson(CHROME_IDS_KEY, [...chrome]);
+    }
+
+    // Collect every plausible member picture in a page or feed, in the order
+    // they appear. Nothing here trusts a single tag — FetLife's og:image is
+    // their own logo, not the person's photo.
+    function collectAvatarCandidates(html) {
+        if (!html || typeof html !== 'string') return [];
+        const raw = html.match(/https?:(?:\\\/\\\/|\/\/)[a-z0-9.-]*fetlife\.com\/[^"'\s\\)<>]+/gi) || [];
+        const seen = new Set();
+        const out = [];
+        for (const r of raw) {
+            const u = cleanImgUrl(r).replace(/[,;]+$/, '');
+            if (seen.has(u) || !isMemberPicture(u)) continue;
+            seen.add(u);
+            out.push(u);
+        }
+        return out;
+    }
+
+    // Pick the picture that belongs to the person whose profile this is.
+    function pickOwnerAvatar(html, nickname, trace) {
+        const note = m => { if (trace) trace.push(m); };
+        const cands = collectAvatarCandidates(html);
+        if (!cands.length) return null;
+
+        const order = [];
+        const byId = new Map();
+        for (const u of cands) {
+            const id = attachmentId(u) || u;
+            if (!byId.has(id)) { byId.set(id, []); order.push(id); }
+            byId.get(id).push(u);
+        }
+
+        const chrome = learnChromeIds(nickname, order);
+        let usable = order.filter(id => !chrome.has(id));
+
+        // Until the header avatar has been identified, the safe reading is that
+        // the first picture on the page is it — it sits in the header, above
+        // the profile. Showing nothing beats showing the wrong person.
+        if (usable.length === order.length && order.length > 1) {
+            usable = usable.slice(1);
+            note('Skipping the first picture (site header)');
+        } else if (usable.length === order.length) {
+            note('Only one picture on the page and it has not been ruled out as the header — skipping');
+            return null;
+        }
+        if (!usable.length) {
+            note('Every picture on the page was your own header avatar');
+            return null;
+        }
+
+        // Within the person's own picture, prefer the size closest to how big
+        // the results list draws it. a50 is a 2 KB thumbnail; a400 is oversized.
+        const sizeOf = u => {
+            const m = u.match(/\/a(\d{2,4})\.(?:jpe?g|png|webp|gif)/i)
+                   || u.match(/[_-](\d{2,4})\.(?:jpe?g|png|webp|gif)/i);
+            return m ? parseInt(m[1]) : 160;
+        };
+        const group = byId.get(usable[0]).slice()
+            .sort((a, b) => Math.abs(sizeOf(a) - 160) - Math.abs(sizeOf(b) - 160));
+        return group[0];
+    }
+
+    function avatarUrlFromProfileHtml(html, nickname, trace) {
+        const note = m => { if (trace) trace.push(m); };
+        const picked = pickOwnerAvatar(html, nickname, trace);
+        if (picked) return picked;
+        note('No member picture in the profile page HTML (only site graphics)');
+        return null;
+    }
+
+    async function fetchAvatarFromProfile(profileUrl, trace, nickname) {
+        const note = m => { if (trace) trace.push(m); };
+        try {
+            const resp = await gmFetch(profileUrl, { 'Accept': 'text/html' });
+            note('Profile page: HTTP ' + resp.status + ', ' +
+                 ((resp.responseText || '').length) + ' characters');
+            if (!resp.ok || !resp.responseText) {
+                console.log('[ASL] Profile page fetch failed:', resp.status, profileUrl);
+                return null;
+            }
+            const url = avatarUrlFromProfileHtml(
+                resp.responseText,
+                nickname || profileUrl.replace(/\/+$/, '').split('/').pop(),
+                trace);
+            if (!url) {
+                console.log('[ASL] No CDN image in profile page for', profileUrl);
+                return null;
+            }
+            console.log('[ASL] Avatar from profile page:', url.substring(0, 70));
+            note('Picture URL: ' + url.substring(0, 80));
+            const b64 = await fetchImageAsBase64(url, trace);
+            return b64 || url;
+        } catch(e) {
+            console.error('[ASL] fetchAvatarFromProfile error:', e);
+            note('Profile page fetch threw: ' + e.message);
+            return null;
+        }
+    }
+
+    async function fetchActivityDate(profileUrl, wantAvatar) {
+        try {
+            const resp = await fetchActivityRaw(profileUrl);
+            const canonical = nicknameFromUrl(resp.finalUrl);
+            const origNick = profileUrl.replace(/\/+$/, '').split('/').pop();
+
+            if (isLockedOut(resp)) {
+                lockoutDetected = true;
+                return { date: null, error: 'LOCKED', lockedOut: true, canonical: null };
+            }
+
             if (!resp.ok) {
                 console.log('[ASL] Activity fetch failed:', resp.status, profileUrl);
-                return { date: null, error: resp.status };
+                return { date: null, error: resp.status, canonical };
             }
-            const data = await resp.json();
+
+            let data = null;
+            let latest = null;
+            try { data = JSON.parse(resp.responseText); } catch(e) {
+                // FetLife sometimes answers /activity with the rendered page
+                // instead of JSON. Read the dates out of the markup, but keep
+                // going so the avatar lookup below still runs.
+                console.log('[ASL] Activity response not JSON, trying HTML parse for:', profileUrl);
+                latest = parseActivityFromHtml(resp.responseText).date;
+            }
 
             // Find the most recent created_at from any story in any story_group
-            let latest = null;
-            if (data.story_groups) {
+            if (data && data.story_groups) {
                 for (const group of data.story_groups) {
                     for (const story of (group.stories || [])) {
                         if (story.created_at) {
@@ -604,21 +1221,314 @@
                     }
                 }
             }
-            return { date: latest, error: null };
+
+            // If requested, extract the avatar from THIS SAME response (no extra request)
+            let avatar;
+            if (wantAvatar) {
+                const matchNick = canonical || origNick;
+                const url = data ? findAvatarForNickname(data, matchNick, 0) : null;
+                if (url && isMemberPicture(url.replace(/\\\//g, '/'))) {
+                    const cleanUrl = url.replace(/\\\//g, '/');
+                    console.log('[ASL] Matched avatar for', matchNick, ':', cleanUrl.substring(0, 60));
+                    const b64 = await fetchImageAsBase64(cleanUrl);
+                    avatar = b64 || cleanUrl;
+                } else {
+                    // Not in the feed — fall back to the profile page, which
+                    // always shows their avatar.
+                    avatar = await fetchAvatarFromProfile(profileUrl, null, matchNick);
+                }
+            }
+            return { date: latest, error: null, canonical, avatar };
         } catch (e) {
             console.error('[ASL] Activity fetch error:', e, profileUrl);
             return { date: null, error: e.message };
         }
     }
 
-    async function startActivityCheck() {
-        const results = getSavedResults();
+    function parseActivityFromHtml(html) {
+        if (!html || typeof html !== 'string') return { date: null, error: null };
+        // Fallback: try to find activity timestamps in HTML
+        const timeMatches = html.match(/datetime="([^"]+)"/g);
+        if (timeMatches && timeMatches.length > 0) {
+            let latest = null;
+            for (const m of timeMatches) {
+                const dateStr = m.match(/datetime="([^"]+)"/)[1];
+                const d = new Date(dateStr);
+                if (!isNaN(d.getTime()) && (!latest || d > latest)) latest = d;
+            }
+            return { date: latest, error: null };
+        }
+        return { date: null, error: null };
+    }
+
+    // Extract a CDN image URL, but ONLY from a value under an "avatar" key.
+    // (Never grabs post images or other nested pictures.)
+    function extractAvatarUrl(val, depth) {
+        if (val == null || depth > 4) return null;
+        if (typeof val === 'string') {
+            return /pic[a-z0-9-]*\.cdn\.fetlife\.com/i.test(val) ? val : null;
+        }
+        if (typeof val === 'object') {
+            // avatar objects often hold size variants — take any cdn url within
+            for (const k in val) {
+                const r = extractAvatarUrl(val[k], depth + 1);
+                if (r) return r;
+            }
+        }
+        return null;
+    }
+
+    // Walk the JSON to find the AVATAR field of the object whose nickname
+    // matches the profile owner. Requires an actual avatar-named key.
+    function findAvatarForNickname(obj, nickname, depth) {
+        if (obj == null || depth > 8) return null;
+        if (Array.isArray(obj)) {
+            for (const item of obj) {
+                const r = findAvatarForNickname(item, nickname, depth + 1);
+                if (r) return r;
+            }
+            return null;
+        }
+        if (typeof obj === 'object') {
+            const nn = (obj.nickname || obj.username || obj.slug || '').toString().toLowerCase();
+            if (nn && nn === nickname.toLowerCase()) {
+                // Look for an avatar-named key on this owner object
+                for (const k in obj) {
+                    if (/avatar/i.test(k)) {
+                        const url = extractAvatarUrl(obj[k], 0);
+                        if (url) return url;
+                    }
+                }
+            }
+            for (const k in obj) {
+                const r = findAvatarForNickname(obj[k], nickname, depth + 1);
+                if (r) return r;
+            }
+        }
+        return null;
+    }
+
+    async function fetchFreshAvatar(profileUrl) {
+        try {
+            // The /activity endpoint returns real JSON. It can contain OTHER
+            // users' images (comments, friends' activity), so we must match the
+            // avatar to the profile owner's nickname — never grab the first image.
+            const nickname = profileUrl.replace(/\/+$/, '').split('/').pop();
+            const activityUrl = profileUrl.replace(/\/?$/, '/activity');
+            const resp = await gmFetch(activityUrl, { 'Accept': 'application/json' });
+            // Detect username changes via the redirected URL
+            const canonical = nicknameFromUrl(resp.finalUrl) || nickname;
+            if (!resp.ok || !resp.responseText) return { avatar: null, canonical };
+
+            let data;
+            try { data = JSON.parse(resp.responseText); } catch(e) {
+                console.log('[ASL] Activity JSON parse failed for', nickname);
+                return { avatar: null, canonical };
+            }
+
+            // Match by canonical nickname (handles renames)
+            const url = findAvatarForNickname(data, canonical, 0);
+            if (!url) {
+                console.log('[ASL] No avatar matched to', canonical, '— leaving existing pic');
+                return { avatar: null, canonical };
+            }
+            const cleanUrl = url.replace(/\\\//g, '/');
+            console.log('[ASL] Matched avatar for', canonical, ':', cleanUrl.substring(0, 60));
+            const b64 = await fetchImageAsBase64(cleanUrl);
+            return { avatar: b64 || cleanUrl, canonical };
+        } catch(e) {
+            console.error('[ASL] fetchFreshAvatar error:', e);
+            return { avatar: null, canonical: null };
+        }
+    }
+
+    // Get the current Active set (checked + active within threshold), optionally skipping pics
+    async function getActiveSet(skipWithPics) {
+        const activityDays = parseInt(document.getElementById('asl-activity').value) || 90;
+        const cutoff = new Date();
+        cutoff.setDate(cutoff.getDate() - activityDays);
+        const results = await dbGetAllResults();
+        let active = results.filter(p => p.activityChecked && p.lastActivity && new Date(p.lastActivity) >= cutoff);
+        if (skipWithPics) active = active.filter(p => !p.avatar);
+        return active;
+    }
+
+    // Retry profiles whose activity check errored (e.g. 406/429/404).
+    // These are marked "checked" so normal Check Activity skips them, and
+    // they have no activity date so the Active tab can't reach them either.
+    async function retryFailedChecks() {
+        const results = await dbGetAllResults();
+        const failed = results.filter(p => p.activityChecked && p.activityError && !p.gone && !p.restricted);
+
+        if (failed.length === 0) {
+            setStatus('No retryable failures. (Deleted 404s and private 401s are excluded — they cannot resolve.)');
+            return;
+        }
+
+        console.log('[ASL] Retrying', failed.length, 'failed checks');
+        for (const p of failed) {
+            p.activityChecked = false;
+            p.checkedAt = null;
+            p.activityError = null;
+        }
+        await dbPutResults(failed);
+        setStatus('Retrying ' + failed.length + ' failed activity checks (with photo refresh)...');
+        await loadAndDisplayResults();
+        // refreshAvatars = true: these profiles usually have stale pics too,
+        // and we're already fetching their activity, so restore both at once.
+        setTimeout(() => startActivityCheck(true, failed), 500);
+    }
+
+    // v8.13.0 trusted the og:image tag, which on FetLife is their own site logo
+    // rather than the member's photo — so some profiles ended up holding an
+    // identical picture. A real avatar is unique to one person, so any image
+    // saved against several profiles is site furniture. Clear those.
+    const PURGE_FLAG = 'asl_purged_shared_avatars_v2';
+    async function purgeSharedAvatars() {
+        try {
+            if (localStorage.getItem(PURGE_FLAG)) return;
+            const all = await dbGetAllResults();
+            const counts = new Map();
+            for (const p of all) {
+                if (!p.avatar) continue;
+                const k = p.avatar.length + '|' + p.avatar.slice(-64);
+                counts.set(k, (counts.get(k) || 0) + 1);
+            }
+            const toClear = all.filter(p => {
+                if (!p.avatar) return false;
+                return counts.get(p.avatar.length + '|' + p.avatar.slice(-64)) >= 3;
+            });
+            if (toClear.length) {
+                for (const p of toClear) p.avatar = '';
+                await dbPutResults(toClear);
+                console.log('[ASL] Cleared', toClear.length, 'duplicate (site graphic) avatars');
+            }
+            localStorage.setItem(PURGE_FLAG, '1');
+        } catch(e) {
+            console.error('[ASL] purgeSharedAvatars failed:', e);
+        }
+    }
+
+    // Fetch one profile's picture, recording each step. Returns the picture
+    // (base64 where the download succeeded, otherwise the bare URL) or null.
+    //
+    // This already asks for /activity to find the picture, so it reads the
+    // dates out of the same response — refreshing when someone was last
+    // active costs nothing extra here, and a stale date is as misleading as
+    // a stale photo.
+    async function photoPipeline(nickname, trace) {
+        const note = m => { if (trace) trace.push(m); };
+        const profileUrl = 'https://fetlife.com/' + nickname;
+        let avatar = null;
+        let sourceUrl = null;
+        let lastActivity = null;
+        let canonicalNick = null;
+        let candidateCount = null;
+        try {
+            const resp = await fetchActivityRaw(profileUrl);
+            note('Activity feed: HTTP ' + resp.status);
+            if (isLockedOut(resp)) {
+                note('FetLife has locked you out — stopping.');
+                return { avatar: null, sourceUrl: null, lastActivity: null,
+                         canonicalNick: null, lockedOut: true, candidateCount };
+            }
+            if (resp.ok) {
+                let data = null;
+                try { data = JSON.parse(resp.responseText); }
+                catch(e) { note('Feed came back as a web page, not data (' + (resp.responseText || '').length + ' chars)'); }
+                const canonical = nicknameFromUrl(resp.finalUrl) || nickname;
+                canonicalNick = canonical;
+                if (data && data.story_groups) {
+                    for (const group of data.story_groups) {
+                        for (const story of (group.stories || [])) {
+                            if (!story.created_at) continue;
+                            const d = new Date(story.created_at);
+                            if (!isNaN(d.getTime()) && (!lastActivity || d > lastActivity)) lastActivity = d;
+                        }
+                    }
+                } else if (!data) {
+                    lastActivity = parseActivityFromHtml(resp.responseText).date;
+                }
+                if (lastActivity) note('Last active: ' + lastActivity.toDateString());
+                const url = data ? findAvatarForNickname(data, canonical, 0) : null;
+                if (url && isMemberPicture(url.replace(/\\\//g, '/'))) {
+                    note('Feed has their picture');
+                    sourceUrl = url.replace(/\\\//g, '/');
+                    avatar = await fetchImageAsBase64(sourceUrl, trace) || null;
+                } else {
+                    note('Feed has no picture — trying the profile page');
+                }
+            }
+            if (!avatar) {
+                const pg = await gmFetch(profileUrl, { 'Accept': 'text/html' });
+                note('Profile page: HTTP ' + pg.status + ', ' + ((pg.responseText || '').length) + ' chars');
+                const cands = collectAvatarCandidates(pg.responseText || '');
+                candidateCount = cands.length;
+                note('Member pictures on that page: ' + cands.length);
+                const chosen = pickOwnerAvatar(pg.responseText || '', nickname, trace);
+                if (chosen) {
+                    note('Using: ' + chosen.substring(0, 95));
+                    sourceUrl = chosen;
+                    avatar = await fetchImageAsBase64(chosen, trace) || chosen;
+                }
+            }
+        } catch(e) {
+            note('Error: ' + e.message);
+        }
+        return { avatar, sourceUrl, lastActivity, canonicalNick,
+                 lockedOut: false, candidateCount };
+    }
+
+    async function recheckByAge() {
+        const minAge = parseInt(document.getElementById('asl-recheck-amin').value) || 18;
+        const maxAge = parseInt(document.getElementById('asl-recheck-amax').value) || 99;
+        const skipWithPics = document.getElementById('asl-recheck-skip-pics').checked;
+        let active = await getActiveSet(skipWithPics);
+        const toReset = active.filter(p => p.age >= minAge && p.age <= maxAge);
+
+        if (toReset.length === 0) {
+            setStatus('No active profiles found in age range ' + minAge + '-' + maxAge + (skipWithPics ? ' (without a saved pic)' : ''));
+            return;
+        }
+
+        for (const p of toReset) { p.activityChecked = false; p.checkedAt = null; }
+        await dbPutResults(toReset);
+        setStatus('Re-checking ' + toReset.length + ' active profiles (age ' + minAge + '-' + maxAge + ') with avatar refresh...');
+        await loadAndDisplayResults();
+        setTimeout(() => startActivityCheck(true, toReset), 500);
+    }
+
+    async function recheckLastN() {
+        let from = parseInt(document.getElementById('asl-recheck-from').value) || 1;
+        let to = parseInt(document.getElementById('asl-recheck-to').value) || 500;
+        if (from > to) { const t = from; from = to; to = t; }
+        const skipWithPics = document.getElementById('asl-recheck-skip-pics').checked;
+        let active = await getActiveSet(skipWithPics);
+        // Order to match the Active tab's current sort
+        const activeSort = (document.getElementById('asl-active-sort') || {}).value || 'activity';
+        active = sortProfiles(active, activeSort);
+        const toReset = active.slice(from - 1, to);
+        console.log('[ASL] Re-check range #' + from + '-' + to + ' (sort=' + activeSort + ', skipPics=' + skipWithPics + '):', toReset.map(p => p.nickname));
+
+        if (toReset.length === 0) {
+            setStatus('No active profiles in range ' + from + '-' + to + ' (only ' + active.length + ' active' + (skipWithPics ? ' without a pic' : '') + ').');
+            return;
+        }
+
+        for (const p of toReset) { p.activityChecked = false; p.checkedAt = null; }
+        await dbPutResults(toReset);
+        setStatus('Re-checking active profiles #' + from + '-' + to + ' (' + toReset.length + ') with avatar refresh...');
+        await loadAndDisplayResults();
+        setTimeout(() => startActivityCheck(true, toReset), 500);
+    }
+
+    async function startActivityCheck(refreshAvatars, explicitProfiles) {
+        const results = await dbGetAllResults();
         if (results.length === 0) {
             setStatus('No results to check activity for.');
             return;
         }
 
-        // Get the activity threshold from the dropdown
         const activityDays = parseInt(document.getElementById('asl-activity').value) || 90;
         if (activityDays === 0) {
             setStatus('Activity filter set to "Any" — nothing to check.');
@@ -628,20 +1538,26 @@
         const cutoffDate = new Date();
         cutoffDate.setDate(cutoffDate.getDate() - activityDays);
 
-        // Find profiles that haven't been checked yet, limited by batch size
-        const allUnchecked = results.filter(p => !p.activityChecked);
-        if (allUnchecked.length === 0) {
-            setStatus('All profiles already checked. Filtering...');
-            loadAndDisplayResults();
-            return;
+        let unchecked;
+        if (explicitProfiles && explicitProfiles.length) {
+            // Re-check exactly the profiles passed in (nothing else)
+            unchecked = explicitProfiles;
+        } else {
+            const allUnchecked = results.filter(p => !p.activityChecked);
+            if (allUnchecked.length === 0) {
+                setStatus('All profiles already checked. Filtering...');
+                await loadAndDisplayResults();
+                return;
+            }
+            const checkLimit = parseInt(document.getElementById('asl-check-limit').value) || 100;
+            unchecked = allUnchecked.slice(-checkLimit);
         }
-        const checkLimit = parseInt(document.getElementById('asl-check-limit').value) || 100;
-        // Take the LAST N unchecked (bottom of list = most recently added results)
-        const unchecked = allUnchecked.slice(-checkLimit);
 
         activityCheckAbort = false;
+        lockoutDetected = false;
+        lastCheckBatchTime = Date.now();
+        localStorage.setItem('asl_last_check_batch', String(lastCheckBatchTime));
 
-        // Show UI
         const progressEl = document.getElementById('asl-activity-progress');
         const checkBtn = document.getElementById('asl-check-activity');
         const stopBtn = document.getElementById('asl-stop-activity');
@@ -655,6 +1571,10 @@
         let inactive = 0;
         let errors = 0;
 
+        // The photo filler steps aside while this runs, so the two never make
+        // requests at the same time.
+        activityCheckRunning = true;
+        try {
         for (const p of unchecked) {
             if (activityCheckAbort) {
                 console.log('[ASL] Activity check stopped by user.');
@@ -671,26 +1591,62 @@
                 <div class="bar"><div class="fill" style="width:${Math.round(checked/total*100)}%"></div></div>
             `;
 
-            const [result, avatarResult] = await Promise.all([
-                fetchActivityDate(p.url),
-                fetchAvatar(p.url)
-            ]);
+            // One request to /activity gives both the date and (in refresh mode)
+            // the avatar — avoids the redundant second call that caused rate-limit errors.
+            const result = await fetchActivityDate(p.url, refreshAvatars);
 
-            // Update avatar if we got a fresh one
-            if (avatarResult.avatar) p.avatar = avatarResult.avatar;
+            // Hard stop if FetLife locked the account — continuing makes it worse
+            if (result.lockedOut || lockoutDetected) {
+                lockoutDetected = true;
+                activityCheckAbort = true;
+                progressEl.innerHTML = '<strong style="color:#f66">⛔ STOPPED — FetLife temporarily locked your account.</strong><br>' +
+                    'Wait until the lockout expires, then increase the delay before running again. ' +
+                    'Checked ' + (checked - 1) + ' of ' + total + ' before stopping.';
+                setStatus('Stopped: FetLife lockout detected. Wait it out, then slow the delay down.');
+                console.warn('[ASL] LOCKOUT DETECTED — aborting run at profile', p.nickname);
+                break;
+            }
+
+            if (refreshAvatars) {
+                // Only replace the photo when we actually found one. Clearing on
+                // a miss would wipe working pics; dead URLs are already detected
+                // and cleared when they fail to render.
+                if (!result.error && result.avatar) p.avatar = result.avatar;
+            }
+
+            // Handle username changes: if the profile redirected to a new
+            // nickname, migrate the record to the new key.
+            const canonical = result && result.canonical;
+            if (canonical && canonical.toLowerCase() !== p.nickname.toLowerCase()) {
+                console.log('[ASL] Username change:', p.nickname, '→', canonical);
+                await dbDelete(p.nickname);
+                p.nickname = canonical;
+                p.url = 'https://fetlife.com/' + canonical;
+            }
 
             p.activityChecked = true;
+            p.checkedAt = Date.now();
             if (result.error) {
-                p.lastActivity = null;
+                // A failed request tells us nothing about whether they're active.
+                // Keep the existing lastActivity instead of wiping it — clearing
+                // it silently drops the profile out of the Active tab.
                 p.activityError = result.error;
+                // Permanent per-profile conditions — retrying can never help:
+                //  404 = account deleted or renamed away
+                //  401/403 = activity feed is private/restricted to us
+                if (result.error === 404) p.gone = true;
+                if (result.error === 401 || result.error === 403) p.restricted = true;
                 errors++;
-                // On rate limit (429) or server error, wait longer
                 if (result.error === 429 || result.error === 503) {
                     console.log('[ASL] Rate limited, waiting 30s...');
                     progressEl.innerHTML += '<br><span style="color:#cc6">Rate limited — waiting 30 seconds...</span>';
                     await sleep(30000);
                 }
             } else if (result.date) {
+                // Successful check — clear any stale error flag
+                p.activityError = null;
+                p.gone = false;
+                p.restricted = false;
                 p.lastActivity = result.date.toISOString();
                 if (result.date >= cutoffDate) {
                     active++;
@@ -698,117 +1654,41 @@
                     inactive++;
                 }
             } else {
-                p.lastActivity = null; // No activity section found
+                // Successful response, but the feed had no activity at all
+                p.activityError = null;
+                p.gone = false;
+                p.restricted = false;
+                p.lastActivity = null;
                 inactive++;
             }
 
             // Save after each check so progress isn't lost
-            saveResults(results);
+            await dbPutResults([p]);
 
-            // Random delay between 3-8 seconds to look natural
             if (checked < total && !activityCheckAbort) {
-                const delay = randomDelay(3000, 8000);
+                const minS = parseFloat((document.getElementById('asl-act-min') || {}).value) || 3;
+                const maxS = parseFloat((document.getElementById('asl-act-max') || {}).value) || 6;
+                const delay = randomDelay(minS * 1000, Math.max(maxS, minS) * 1000);
                 console.log('[ASL] Next activity check in', Math.round(delay/1000), 'seconds');
                 await sleep(delay);
             }
         }
 
-        // Done
+        } finally {
+            activityCheckRunning = false;
+            startPhotoWorker();
+        }
+
         stopBtn.style.display = 'none';
-        const remaining = allUnchecked.length - checked;
+        const remaining = unchecked.length - checked;
         const msg = activityCheckAbort
-            ? `Activity check paused — ${checked}/${total} checked. ${active} active, ${inactive} inactive.${remaining > 0 ? ' ' + remaining + ' still unchecked.' : ''}`
-            : `Activity check complete! ${active} active, ${inactive} inactive out of ${total} checked.${remaining > 0 ? ' ' + remaining + ' still unchecked.' : ''}`;
+            ? `Activity check paused — ${checked}/${total} checked. ${active} active, ${inactive} inactive.${remaining > 0 ? ' ' + remaining + ' remaining in batch.' : ''}`
+            : `Activity check complete! ${active} active, ${inactive} inactive out of ${total} checked.`;
         progressEl.innerHTML = `<strong>${msg}</strong>`;
         setStatus(msg);
-        loadAndDisplayResults();
-    }
-
-    // =====================
-    // REFRESH AVATARS
-    // =====================
-    async function fetchAvatar(profileUrl) {
-        try {
-            const resp = await fetch(profileUrl, {
-                credentials: 'same-origin',
-                headers: { 'Accept': 'text/html' }
-            });
-            if (!resp.ok) return { avatar: null, error: resp.status };
-            const html = await resp.text();
-            // Look for avatar image in profile page HTML
-            // FetLife profile pages have og:image meta tag with the avatar URL
-            const ogMatch = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/);
-            if (ogMatch && ogMatch[1]) return { avatar: ogMatch[1], error: null };
-            // Fallback: look for avatar img tags
-            const imgMatch = html.match(/<img[^>]+class="[^"]*ipp[^"]*"[^>]+src="([^"]+)"/);
-            if (imgMatch && imgMatch[1]) return { avatar: imgMatch[1], error: null };
-            return { avatar: null, error: null };
-        } catch (e) {
-            return { avatar: null, error: e.message };
-        }
-    }
-
-    async function refreshAvatars() {
-        const results = getSavedResults();
-        if (results.length === 0) {
-            setStatus('No results to refresh.');
-            return;
-        }
-
-        refreshAbort = false;
-
-        const progressEl = document.getElementById('asl-activity-progress');
-        const refreshBtn = document.getElementById('asl-refresh');
-        const stopBtn = document.getElementById('asl-stop-activity');
-        refreshBtn.style.display = 'none';
-        stopBtn.style.display = 'block';
-        progressEl.style.display = 'block';
-
-        const total = results.length;
-        let refreshed = 0;
-        let updated = 0;
-        let errors = 0;
-
-        for (const p of results) {
-            if (refreshAbort) break;
-
-            refreshed++;
-            progressEl.innerHTML = `
-                Refreshing avatars: <strong>${refreshed}</strong> / ${total}
-                &nbsp;—&nbsp; <span style="color:#6c6">${updated} updated</span>
-                ${errors > 0 ? '&nbsp;/&nbsp; <span style="color:#cc6">' + errors + ' errors</span>' : ''}
-                &nbsp;— ${esc(p.nickname)}
-                <div class="bar"><div class="fill" style="width:${Math.round(refreshed/total*100)}%"></div></div>
-            `;
-
-            const result = await fetchAvatar(p.url);
-
-            if (result.error) {
-                errors++;
-                if (result.error === 429 || result.error === 503) {
-                    progressEl.innerHTML += '<br><span style="color:#cc6">Rate limited — waiting 30 seconds...</span>';
-                    await sleep(30000);
-                }
-            } else if (result.avatar) {
-                p.avatar = result.avatar;
-                updated++;
-            }
-
-            saveResults(results);
-
-            if (refreshed < total && !refreshAbort) {
-                const delay = randomDelay(3000, 8000);
-                await sleep(delay);
-            }
-        }
-
-        stopBtn.style.display = 'none';
-        const msg = refreshAbort
-            ? `Avatar refresh paused — ${refreshed}/${total} checked. ${updated} updated.`
-            : `Avatar refresh complete! ${updated} updated out of ${total}.`;
-        progressEl.innerHTML = `<strong>${msg}</strong>`;
-        setStatus(msg);
-        loadAndDisplayResults();
+        // Show the freshly-active profiles in the Active tab
+        await loadAndDisplayResults();
+        document.querySelector('#asl-tabs button[data-t="active"]')?.click();
     }
 
     // =====================
@@ -821,7 +1701,11 @@
 
             const rawText = card.textContent.replace(/\s+/g, ' ').trim();
             const img = card.querySelector('img');
-            const avatar = img ? img.src : '';
+            let avatar = '';
+            if (img) {
+                // Try multiple sources — FetLife may use lazy loading
+                avatar = img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('src') || '';
+            }
 
             let infoText = rawText;
             if (rawText.toLowerCase().startsWith(nickname.toLowerCase())) {
@@ -933,131 +1817,467 @@
     // =====================
     // DISPLAY RESULTS
     // =====================
-    function loadAndDisplayResults() {
-        const results = getSavedResults();
-        const container = document.getElementById('asl-res');
-        if (!container) return;
+    function makePlaceholder() {
+        const div = document.createElement('div');
+        Object.assign(div.style, {width:'110px',height:'110px',borderRadius:'8px',background:'#333',display:'flex',alignItems:'center',justifyContent:'center',color:'#666',fontSize:'24px',flexShrink:'0'});
+        div.textContent = '?';
+        return div;
+    }
 
-        container.innerHTML = '';
-        const countEl = document.getElementById('asl-rcount');
-        const activityDays = parseInt(document.getElementById('asl-activity').value) || 0;
-
-        // Filter by activity if threshold is set and checks have been done
-        let displayResults = results;
-        let filteredCount = 0;
-        if (activityDays > 0) {
-            const cutoff = new Date();
-            cutoff.setDate(cutoff.getDate() - activityDays);
-            displayResults = results.filter(p => {
-                if (!p.activityChecked) return true; // Show unchecked profiles
-                if (!p.lastActivity) { filteredCount++; return false; }
-                const d = new Date(p.lastActivity);
-                if (d >= cutoff) return true;
-                filteredCount++;
-                return false;
-            });
-        }
-
-        if (results.length === 0) {
-            countEl.textContent = 'No results yet.';
-            document.getElementById('asl-csv').style.display = 'none';
-            document.getElementById('asl-refresh').style.display = 'none';
-            document.getElementById('asl-clear').style.display = 'none';
-            document.getElementById('asl-check-activity').style.display = 'none';
-            document.getElementById('asl-rtab-count').textContent = '';
-            return;
-        }
-
-        const uncheckedCount = results.filter(p => !p.activityChecked).length;
-        let statusText = displayResults.length + ' matches shown';
-        if (filteredCount > 0) statusText += ' (' + filteredCount + ' filtered as inactive)';
-        if (uncheckedCount > 0 && activityDays > 0) statusText += ' — ' + uncheckedCount + ' not yet checked';
-        countEl.textContent = statusText;
-
-        document.getElementById('asl-csv').style.display = 'block';
-        document.getElementById('asl-refresh').style.display = 'block';
-        document.getElementById('asl-clear').style.display = 'block';
-        document.getElementById('asl-rtab-count').textContent = '(' + displayResults.length + ')';
-
-        // Show "Check Activity" button if there are unchecked results and filter is active
-        const checkBtn = document.getElementById('asl-check-activity');
-        if (uncheckedCount > 0 && activityDays > 0) {
-            checkBtn.style.display = 'block';
-            checkBtn.textContent = 'Check Activity (' + uncheckedCount + ' unchecked)';
-        } else {
-            checkBtn.style.display = 'none';
-        }
-
-        // Sort results
-        const sortMode = (document.getElementById('asl-sort') || {}).value || 'newest';
-        let sorted = [...displayResults];
+    function sortProfiles(list, sortMode) {
+        const sorted = [...list];
         if (sortMode === 'newest') {
-            sorted.reverse();
+            sorted.sort((a, b) => {
+                const batchDiff = (b.batch || 0) - (a.batch || 0);
+                if (batchDiff !== 0) return batchDiff;
+                return (b.foundAt || 0) - (a.foundAt || 0);
+            });
         } else if (sortMode === 'age-asc') {
             sorted.sort((a, b) => (a.age || 999) - (b.age || 999));
         } else if (sortMode === 'age-desc') {
             sorted.sort((a, b) => (b.age || 0) - (a.age || 0));
-        } else if (sortMode === 'activity') {
+        } else if (sortMode === 'checked') {
+            sorted.sort((a, b) => (b.checkedAt || 0) - (a.checkedAt || 0));
+        } else { // 'activity'
             sorted.sort((a, b) => {
                 const da = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
                 const db = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
                 return db - da;
             });
         }
+        return sorted;
+    }
 
-        let currentBatch = null;
-        for (const p of sorted) {
-            if (sortMode === 'newest' && p.batch && p.batch !== currentBatch) {
-                currentBatch = p.batch;
-                const divider = document.createElement('div');
-                divider.className = 'asl-batch-divider';
-                divider.textContent = '— Search ' + p.batch + ' (pages ' + (p.batchPages || '?') + ') —';
-                container.appendChild(divider);
-            }
-
-            const d = document.createElement('div');
-            d.className = 'asl-r';
-            const avImg = p.avatar
-                ? `<img src="${esc(p.avatar)}" alt="" loading="lazy">`
-                : `<div style="width:110px;height:110px;border-radius:8px;background:#333;display:flex;align-items:center;justify-content:center;color:#666;font-size:24px;flex-shrink:0">?</div>`;
-            const av = `<a class="av" href="${esc(p.url)}" target="_blank">${avImg}</a>`;
-            const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
-
-            // Activity line
-            let activityLine = '';
-            if (p.activityChecked) {
-                if (p.lastActivity) {
-                    const d = new Date(p.lastActivity);
-                    const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-                    const daysAgo = Math.floor((Date.now() - d.getTime()) / 86400000);
-                    const isRecent = daysAgo <= (activityDays || 90);
-                    activityLine = `<div class="m ${isRecent ? 'active' : 'inactive'}">Last active: ${dateStr} (${daysAgo}d ago)</div>`;
-                } else if (p.activityError) {
-                    activityLine = `<div class="m inactive">Activity check failed (${p.activityError})</div>`;
-                } else {
-                    activityLine = `<div class="m inactive">No activity found</div>`;
+    // When a stored avatar URL fails to load it has expired. Clear it (batched)
+    // so the "missing photos" count reflects what's actually broken.
+    const brokenAvatarQueue = new Set();
+    let brokenFlushTimer = null;
+    function markAvatarBroken(nickname) {
+        brokenAvatarQueue.add(nickname);
+        if (brokenFlushTimer) clearTimeout(brokenFlushTimer);
+        brokenFlushTimer = setTimeout(async () => {
+            const names = [...brokenAvatarQueue];
+            brokenAvatarQueue.clear();
+            brokenFlushTimer = null;
+            try {
+                const all = await dbGetAllResults();
+                const toClear = all.filter(p => names.includes(p.nickname) && p.avatar);
+                if (toClear.length) {
+                    for (const p of toClear) p.avatar = '';
+                    await dbPutResults(toClear);
+                    console.log('[ASL] Cleared', toClear.length, 'dead avatar URLs');
                 }
+            } catch(e) { console.error('[ASL] markAvatarBroken failed:', e); }
+        }, 1500);
+    }
+
+    // =====================
+    // AUTOMATIC PHOTO FILLING
+    // =====================
+    // Photos fill themselves in for whatever is on screen. There is nothing to
+    // click and nothing to know: a card drawn without a picture puts itself in
+    // a queue, and the queue is worked through slowly in the background.
+
+    // The rule that keeps the wrong face off a profile: a picture belongs to
+    // one person. FetLife draws YOUR avatar in the header of every page, so it
+    // appears on everyone's profile — and if an attachment ever gets offered
+    // for a second person, it is chrome, and refused from then on.
+    async function saveAvatar(nickname, avatar, sourceUrl) {
+        const id = sourceUrl ? attachmentId(sourceUrl) : null;
+        if (id) {
+            const owner = readJson(ID_OWNER_KEY, {});
+            if (owner[id] && owner[id] !== nickname) {
+                const chrome = new Set(readJson(CHROME_IDS_KEY, []));
+                chrome.add(id);
+                writeJson(CHROME_IDS_KEY, [...chrome]);
+                console.log('[ASL] Refused shared picture', id, 'for', nickname);
+                return false;
+            }
+            owner[id] = nickname;
+            writeJson(ID_OWNER_KEY, owner);
+        }
+        const rec = await dbGetResult(nickname);
+        if (!rec) return false;
+        rec.avatar = avatar;
+        await dbPutResults([rec]);
+        return true;
+    }
+
+    const photoQueue = [];
+    const photoQueued = new Set();
+    let photoWorkerRunning = false;
+    let activityCheckRunning = false;
+
+    // A profile whose picture could not be found is not retried for a week.
+    // Without this, every redraw re-queues the same hopeless profiles and the
+    // queue never drains.
+    const PHOTO_RETRY_MS = 7 * 86400000;
+    // How old an activity date may get before a visible card refreshes it.
+    // Profiles never checked at all are left to the Check Activity button,
+    // which is the deliberate, interruptible job with its own progress bar.
+    const STALE_ACTIVITY_MS = 14 * 86400000;
+    // However a refresh turns out, don't attempt the same profile again for a
+    // day. Otherwise a profile that cannot be refreshed re-queues on every
+    // redraw and the worker never gets past it.
+    const REFRESH_COOLDOWN_MS = 86400000;
+
+    function queuePhoto(nickname, placeholder, lastTried, card, activityDays) {
+        if (!nickname || photoQueued.has(nickname)) return;
+        if (lastTried && Date.now() - new Date(lastTried).getTime() < PHOTO_RETRY_MS) {
+            if (placeholder) placeholder.title = 'No photo found for this profile';
+            return;
+        }
+        photoQueued.add(nickname);
+        photoQueue.push({ nickname, placeholder, card, activityDays });
+        setPlaceholderState(placeholder, 'waiting');
+        updatePhotoStatus();
+        startPhotoWorker();
+    }
+
+    // The card itself says where it is up to, so "which ones are loading?" is
+    // answerable by looking at the list rather than inferring it.
+    function setPlaceholderState(el, state) {
+        if (!el || el.tagName === 'IMG') return;
+        if (state === 'waiting') {
+            el.textContent = '\u22ef';
+            el.style.color = '#667';
+            el.title = 'Waiting to load photo';
+        } else if (state === 'loading') {
+            el.textContent = '\u25cf';
+            el.style.color = '#6bf';
+            el.title = 'Loading photo now';
+        } else {
+            el.textContent = '?';
+            el.style.color = '#666';
+            el.title = 'No photo found for this profile';
+        }
+    }
+
+    function photoDelay() {
+        const el = id => (document.getElementById(id) || {}).value;
+        const min = (parseFloat(el('asl-act-min')) || 3) * 1000;
+        const max = (parseFloat(el('asl-act-max')) || 6) * 1000;
+        return randomDelay(min, Math.max(max, min + 1));
+    }
+
+    async function startPhotoWorker() {
+        if (photoWorkerRunning) return;
+        photoWorkerRunning = true;
+        try {
+            while (photoQueue.length && !lockoutDetected) {
+                // The activity check is the job the user actually asked for.
+                // Never make requests alongside it.
+                if (activityCheckRunning) { updatePhotoStatus(); await sleep(5000); continue; }
+                const job = photoQueue.shift();
+                photoQueued.delete(job.nickname);
+                // Skip anything scrolled or filtered off the list since queuing.
+                if (job.placeholder && !job.placeholder.isConnected) { updatePhotoStatus(); continue; }
+                setPlaceholderState(job.placeholder, 'loading');
+                updatePhotoStatus();
+                let res = null;
+                try { res = await photoPipeline(job.nickname, null); }
+                catch(e) { console.error('[ASL] photo fill failed for', job.nickname, e); }
+                if (res && res.lockedOut) { lockoutDetected = true; break; }
+                if (res && res.lastActivity) await saveActivity(job.nickname, res.lastActivity);
+                let saved = false;
+                if (res && res.avatar) {
+                    saved = await saveAvatar(job.nickname, res.avatar, res.sourceUrl);
+                }
+                if (!saved) {
+                    setPlaceholderState(job.placeholder, 'none');
+                    await markPhotoTried(job.nickname);
+                }
+                await stampRefreshed(job.nickname);
+                // Redraw the card from the stored record so the picture AND the
+                // refreshed "last active" line are both current.
+                if (job.card && job.card.isConnected) {
+                    const fresh = await dbGetResult(job.nickname);
+                    if (fresh) job.card.replaceWith(buildProfileCard(fresh, job.activityDays));
+                } else if (saved && job.placeholder && job.placeholder.isConnected) {
+                    job.placeholder.replaceWith(makeAvatarImg(job.nickname, res.avatar));
+                }
+                updatePhotoStatus();
+                if (photoQueue.length) await sleep(photoDelay());
+            }
+        } finally {
+            photoWorkerRunning = false;
+            updatePhotoStatus();
+        }
+    }
+
+    // Record a freshly-read activity date from the same request the photo
+    // came out of, so the list's "last active" does not drift out of date
+    // while the photos are being brought up to date.
+    async function saveActivity(nickname, date) {
+        try {
+            const rec = await dbGetResult(nickname);
+            if (!rec) return;
+            const known = rec.lastActivity ? new Date(rec.lastActivity) : null;
+            if (known && known >= date) return;
+            rec.lastActivity = date.toISOString();
+            rec.activityChecked = true;
+            rec.checkedAt = new Date().toISOString();
+            rec.activityError = null;
+            await dbPutResults([rec]);
+        } catch(e) { console.error('[ASL] saveActivity failed:', e); }
+    }
+
+    async function stampRefreshed(nickname) {
+        try {
+            const rec = await dbGetResult(nickname);
+            if (!rec) return;
+            rec.refreshTried = new Date().toISOString();
+            await dbPutResults([rec]);
+        } catch(e) { console.error('[ASL] stampRefreshed failed:', e); }
+    }
+
+    async function markPhotoTried(nickname) {
+        try {
+            const rec = await dbGetResult(nickname);
+            if (!rec) return;
+            rec.photoTried = new Date().toISOString();
+            await dbPutResults([rec]);
+        } catch(e) { console.error('[ASL] markPhotoTried failed:', e); }
+    }
+
+    function updatePhotoStatus() {
+        const el = document.getElementById('asl-photo-status');
+        if (!el) return;
+        const left = photoQueue.length + (photoWorkerRunning ? 1 : 0);
+        if (lockoutDetected) {
+            el.textContent = 'Photo loading stopped — FetLife locked you out.';
+        } else if (activityCheckRunning && left) {
+            el.textContent = 'Background refresh paused until the activity check finishes — ' +
+                left + ' waiting.';
+        } else if (left) {
+            el.textContent = 'Refreshing photos & activity… ' + left +
+                ' to go. The blue dot is the one loading now.';
+        } else {
+            el.textContent = '';
+        }
+    }
+
+    function makeAvatarImg(nickname, src) {
+        const img = document.createElement('img');
+        img.src = src;
+        img.alt = '';
+        img.loading = 'lazy';
+        img.addEventListener('error', function() {
+            const ph = makePlaceholder();
+            this.replaceWith(ph);
+            // The stored link has expired. Drop it and let the filler redo it.
+            markAvatarBroken(nickname);
+            queuePhoto(nickname, ph);  // an expired link always deserves a retry
+        });
+        return img;
+    }
+
+    function buildProfileCard(p, activityDays) {
+        const d = document.createElement('div');
+        d.className = 'asl-r';
+        const avLink = document.createElement('a');
+        avLink.className = 'av';
+        avLink.href = p.url;
+        avLink.target = '_blank';
+        let ph = null;
+        if (p.avatar) {
+            avLink.appendChild(makeAvatarImg(p.nickname, p.avatar));
+        } else {
+            // No picture yet — show a placeholder and have the background
+            // filler replace it in place once it has one.
+            ph = makePlaceholder();
+            avLink.appendChild(ph);
+        }
+        // Refresh anything missing a picture, and anything whose activity date
+        // has gone stale. One request answers both, so a card that needs either
+        // gets brought fully up to date.
+        const staleAfter = Date.now() - STALE_ACTIVITY_MS;
+        const stale = p.activityChecked && p.checkedAt &&
+                      new Date(p.checkedAt).getTime() < staleAfter;
+        const cooling = p.refreshTried &&
+            Date.now() - new Date(p.refreshTried).getTime() < REFRESH_COOLDOWN_MS;
+        if ((!p.avatar || stale) && !cooling) {
+            queuePhoto(p.nickname, ph, p.avatar ? null : p.photoTried, d, activityDays);
+        }
+        const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
+        let activityLine = '';
+        if (p.activityChecked) {
+            if (p.lastActivity) {
+                const dd = new Date(p.lastActivity);
+                const dateStr = dd.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                const daysAgo = Math.floor((Date.now() - dd.getTime()) / 86400000);
+                const isRecent = daysAgo <= (activityDays || 90);
+                activityLine = `<div class="m ${isRecent ? 'active' : 'inactive'}">Last active: ${dateStr} (${daysAgo}d ago)</div>`;
+            } else if (p.activityError) {
+                const label = p.gone ? 'Account deleted or renamed (404)'
+                            : p.restricted ? 'Activity is private (' + p.activityError + ')'
+                            : 'Activity check failed (' + p.activityError + ')';
+                activityLine = `<div class="m inactive">${label}</div>`;
+            } else {
+                activityLine = `<div class="m inactive">No activity found</div>`;
+            }
+        }
+        d.appendChild(avLink);
+        const infoHtml = `<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}${activityLine}</div><div class="act"><a href="${esc(p.url)}" target="_blank">Profile</a><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Message</a></div>`;
+        d.insertAdjacentHTML('beforeend', infoHtml);
+        return d;
+    }
+
+    function renderProfileList(containerId, profiles, sortMode, activityDays, showBatchDividers) {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+        container.innerHTML = '';
+        const sorted = sortProfiles(profiles, sortMode);
+        const PAGE_SIZE = 50;
+        const loadMoreId = containerId + '-more';
+        let shown = 0;
+
+        function renderBatch() {
+            const batch = sorted.slice(shown, shown + PAGE_SIZE);
+            let currentBatch = shown > 0 ? (sorted[shown - 1] || {}).batch : null;
+            for (const p of batch) {
+                if (showBatchDividers && sortMode === 'newest' && p.batch && p.batch !== currentBatch) {
+                    currentBatch = p.batch;
+                    const divider = document.createElement('div');
+                    divider.className = 'asl-batch-divider';
+                    divider.textContent = '— Search ' + p.batch + ' (pages ' + (p.batchPages || '?') + ') —';
+                    container.appendChild(divider);
+                }
+                container.appendChild(buildProfileCard(p, activityDays));
+            }
+            shown += batch.length;
+            const oldBtn = document.getElementById(loadMoreId);
+            if (oldBtn) oldBtn.remove();
+            if (shown < sorted.length) {
+                const btn = document.createElement('button');
+                btn.id = loadMoreId;
+                btn.className = 'asl-b';
+                btn.style.background = '#47a';
+                btn.style.color = '#fff';
+                btn.textContent = 'Load More (' + (sorted.length - shown) + ' remaining)';
+                btn.addEventListener('click', renderBatch);
+                container.appendChild(btn);
+            }
+        }
+        renderBatch();
+    }
+
+    async function loadAndDisplayResults() {
+        const results = await dbGetAllResults();
+        const activityDays = parseInt(document.getElementById('asl-activity').value) || 90;
+        const total = results.length;
+        const checkedCount = results.filter(p => p.activityChecked).length;
+        const uncheckedCount = total - checkedCount;
+
+        // Active = checked, has a lastActivity within the threshold
+        const cutoff = new Date();
+        cutoff.setDate(cutoff.getDate() - activityDays);
+        const active = results.filter(p => p.activityChecked && p.lastActivity && new Date(p.lastActivity) >= cutoff);
+
+        // Counters
+        // "Find" boxes narrow each list by nickname without touching any of the
+        // counts or buttons, which still describe the whole set.
+        const findVal = id => ((document.getElementById(id) || {}).value || '').trim().toLowerCase();
+        const byName = (list, q) => q ? list.filter(p => (p.nickname || '').toLowerCase().includes(q)) : list;
+        const rq = findVal('asl-find');
+        const aq = findVal('asl-active-find');
+        const shownResults = byName(results, rq);
+        const shownActive = byName(active, aq);
+
+        const rcount = document.getElementById('asl-rcount');
+        if (rcount) rcount.textContent = total === 0 ? 'No results yet.'
+            : (rq ? 'Showing ' + shownResults.length + ' of ' + total + ' matching "' + rq + '"'
+                  : total + ' total · ' + checkedCount + ' checked · ' + uncheckedCount + ' unchecked');
+        const acount = document.getElementById('asl-active-count');
+        if (acount) acount.textContent = aq
+            ? 'Showing ' + shownActive.length + ' of ' + active.length + ' matching "' + aq + '"'
+            : active.length + ' active profiles';
+        const rtab = document.getElementById('asl-rtab-count');
+        if (rtab) rtab.textContent = total ? ('(' + total + ')') : '';
+        const atab = document.getElementById('asl-atab-count');
+        if (atab) atab.textContent = active.length ? ('(' + active.length + ')') : '';
+
+        // Buttons
+        const checkBtn = document.getElementById('asl-check-activity');
+        if (checkBtn) {
+            checkBtn.style.display = total ? 'block' : 'none';
+            checkBtn.textContent = 'Check Activity (' + uncheckedCount + ' unchecked)';
+        }
+        // Retry-failed button: only show when there are errored checks
+        const failedCount = results.filter(p => p.activityChecked && p.activityError && !p.gone && !p.restricted).length;
+        const retryBtn = document.getElementById('asl-retry-failed');
+        if (retryBtn) {
+            retryBtn.style.display = failedCount > 0 ? 'block' : 'none';
+            retryBtn.textContent = 'Retry Failed Checks (' + failedCount + ')';
+        }
+        const csvBtn = document.getElementById('asl-csv');
+        if (csvBtn) csvBtn.style.display = total ? 'block' : 'none';
+        const clearBtn = document.getElementById('asl-clear');
+        if (clearBtn) clearBtn.style.display = total ? 'block' : 'none';
+
+        // Render both lists
+        const resultsSort = (document.getElementById('asl-sort') || {}).value || 'newest';
+        const activeSort = (document.getElementById('asl-active-sort') || {}).value || 'newest';
+        renderProfileList('asl-res', shownResults, resultsSort, activityDays, true);
+        renderProfileList('asl-active-res', shownActive, activeSort, activityDays, true);
+    }
+
+    // =====================
+    // CSV IMPORT FOR DEDUP
+    // =====================
+    async function importCSVForDedup() {
+        const fileInput = document.getElementById('asl-import-file');
+        const file = fileInput.files[0];
+        if (!file) return;
+
+        try {
+            const text = await file.text();
+            const lines = text.split('\n');
+            const nicknames = [];
+
+            for (let i = 1; i < lines.length; i++) { // Skip header
+                const line = lines[i].trim();
+                if (!line) continue;
+                // Parse first CSV field (nickname) — handles quoted fields
+                let nickname;
+                if (line.startsWith('"')) {
+                    const end = line.indexOf('"', 1);
+                    nickname = line.substring(1, end);
+                } else {
+                    nickname = line.split(',')[0];
+                }
+                if (nickname) nicknames.push(nickname);
             }
 
-            d.innerHTML = `${av}<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}${activityLine}</div><div class="act"><a href="${esc(p.url)}" target="_blank">Profile</a><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Message</a></div>`;
-            container.appendChild(d);
-        }
+            if (nicknames.length === 0) {
+                setStatus('No nicknames found in CSV.');
+                return;
+            }
 
-        // Switch to results tab
-        const s = getSavedState();
-        if (s && !s.active) {
-            document.querySelector('#asl-tabs button[data-t="results"]')?.click();
+            await dbAddSeenNicknames(nicknames);
+            const totalSeen = await dbGetSeenCount();
+            setStatus('Imported ' + nicknames.length + ' nicknames for dedup. Total seen: ' + totalSeen);
+            updateSeenCount();
+        } catch(e) {
+            console.error('[ASL] CSV import error:', e);
+            setStatus('Error importing CSV: ' + e.message);
         }
+        fileInput.value = ''; // Reset file input
+    }
+
+    async function updateSeenCount() {
+        const el = document.getElementById('asl-seen-count');
+        if (!el) return;
+        const count = await dbGetSeenCount();
+        el.textContent = count > 0 ? count + ' previously seen profiles (will be skipped)' : '';
     }
 
     // =====================
     // CSV EXPORT
     // =====================
-    function exportCSV() {
-        const results = getSavedResults();
-        if (results.length === 0) { alert('No results'); return; }
+    function writeCSV(rows, filenamePrefix) {
         const hdr = ['Nickname','Age','Gender','Role','Location','Last Active','Profile URL'];
-        const rows = results.map(p => {
+        const dataRows = rows.map(p => {
             let lastActive = '';
             if (p.lastActivity) {
                 lastActive = new Date(p.lastActivity).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -1066,12 +2286,25 @@
             }
             return [p.nickname, p.age||'', p.gender||'', p.role||'', p.location||'', lastActive, p.url];
         });
-        const csv = [hdr,...rows].map(r => r.map(c => '"'+String(c).replace(/"/g,'""')+'"').join(',')).join('\n');
+        const csv = [hdr,...dataRows].map(r => r.map(c => '"'+String(c).replace(/"/g,'""')+'"').join(',')).join('\n');
         const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
-        a.download = 'fetlife-activity-' + new Date().toISOString().slice(0,10) + '.csv';
+        a.download = filenamePrefix + '-' + new Date().toISOString().slice(0,10) + '.csv';
         document.body.appendChild(a); a.click(); a.remove();
+    }
+
+    async function exportCSV() {
+        const results = await dbGetAllResults();
+        if (results.length === 0) { alert('No results'); return; }
+        writeCSV(results, 'fetlife-all-results');
+    }
+
+    async function exportActiveCSV() {
+        const active = await getActiveSet(false);
+        if (active.length === 0) { alert('No active profiles'); return; }
+        const activeSort = (document.getElementById('asl-active-sort') || {}).value || 'activity';
+        writeCSV(sortProfiles(active, activeSort), 'fetlife-active');
     }
 
     function esc(s) {
@@ -1082,12 +2315,17 @@
     // INIT
     // =====================
     if (location.hostname === 'fetlife.com') {
-        buildUI();
+        (async function init() {
+            await migrateFromLocalStorage();
+            seedChromeFromHeader();
+            await purgeSharedAvatars();
+            buildUI();
 
-        const isSearching = checkForOngoingSearch();
+            const isSearching = checkForOngoingSearch();
 
-        if (!isSearching) {
-            loadAndDisplayResults();
-        }
+            if (!isSearching) {
+                await loadAndDisplayResults();
+            }
+        })();
     }
 })();
