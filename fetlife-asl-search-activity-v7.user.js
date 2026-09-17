@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.11.1
+// @version        8.12.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -960,6 +960,33 @@
         return m ? m[1] : null;
     }
 
+    // Pull the avatar straight from the profile page HTML. The activity feed
+    // only carries an avatar when the person authored a recent story, so many
+    // profiles come back empty there — the profile page always shows their pic.
+    async function fetchAvatarFromProfile(profileUrl) {
+        try {
+            const resp = await gmFetch(profileUrl, { 'Accept': 'text/html' });
+            if (!resp.ok || !resp.responseText) return null;
+            const html = resp.responseText;
+            const urls = html.match(/https:\\?\/\\?\/pic[a-z0-9-]*\.cdn\.fetlife\.com[^"'\\ )<>]+/gi);
+            if (!urls || !urls.length) {
+                console.log('[ASL] No CDN image in profile page for', profileUrl);
+                return null;
+            }
+            // The avatar renders at the top of the profile, so it appears first.
+            // Prefer a mid-size variant when one of the same image is available.
+            const clean = u => u.replace(/\\\//g, '/').replace(/&amp;/g, '&');
+            const pick = urls.find(u => /-c160\.|\/c160\./.test(u)) || urls[0];
+            const url = clean(pick);
+            console.log('[ASL] Avatar from profile page:', url.substring(0, 70));
+            const b64 = await fetchImageAsBase64(url);
+            return b64 || url;
+        } catch(e) {
+            console.error('[ASL] fetchAvatarFromProfile error:', e);
+            return null;
+        }
+    }
+
     async function fetchActivityDate(profileUrl, wantAvatar) {
         try {
             const resp = await fetchActivityRaw(profileUrl);
@@ -1008,8 +1035,9 @@
                     const b64 = await fetchImageAsBase64(cleanUrl);
                     avatar = b64 || cleanUrl;
                 } else {
-                    console.log('[ASL] No avatar matched to', matchNick);
-                    avatar = null;
+                    // Not in the feed — fall back to the profile page, which
+                    // always shows their avatar.
+                    avatar = await fetchAvatarFromProfile(profileUrl);
                 }
             }
             return { date: latest, error: null, canonical, avatar };
@@ -1295,9 +1323,10 @@
             }
 
             if (refreshAvatars) {
-                // Only touch the photo when the check actually succeeded. On an
-                // error we know nothing new, so keep whatever we already had.
-                if (!result.error) p.avatar = result.avatar || '';
+                // Only replace the photo when we actually found one. Clearing on
+                // a miss would wipe working pics; dead URLs are already detected
+                // and cleared when they fail to render.
+                if (!result.error && result.avatar) p.avatar = result.avatar;
             }
 
             // Handle username changes: if the profile redirected to a new
