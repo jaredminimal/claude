@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.14.0
+// @version        8.15.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -370,6 +370,10 @@
                         </select>
                     </div>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Find</label>
+                        <input type="search" id="asl-find" placeholder="type a name…" style="margin:0;flex:1">
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Check last</label>
                         <input type="number" id="asl-check-limit" min="1" max="99999" value="5000" style="width:80px;margin:0">
                         <label class="fl" style="margin:0;white-space:nowrap">unchecked</label>
@@ -404,6 +408,10 @@
                             <option value="checked">Recently checked</option>
                         </select>
                     </div>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Find</label>
+                        <input type="search" id="asl-active-find" placeholder="type a name…" style="margin:0;flex:1">
+                    </div>
                     <div class="sec">Re-check by Age</div>
                     <div class="row">
                         <div><label class="fl">Min Age</label><input type="number" id="asl-recheck-amin" min="18" max="200" value="18" style="margin-bottom:4px"></div>
@@ -422,6 +430,7 @@
                     <button class="asl-b" id="asl-fix-photos" style="background:#47a;color:#fff;display:none">Refresh Missing Photos</button>
                     <button class="asl-b" id="asl-test-photo" style="background:#555;color:#fff">Test Photo Fetch (1 profile)</button>
                     <button class="asl-b" id="asl-active-csv" style="background:#2a6;color:#fff">Export Active to CSV</button>
+                    <div id="asl-diag"></div>
                     <div id="asl-active-count"></div>
                     <div id="asl-active-res"></div>
                 </div>
@@ -467,6 +476,13 @@
         document.getElementById('asl-active-csv').addEventListener('click', exportActiveCSV);
         document.getElementById('asl-fix-photos').addEventListener('click', refreshMissingPhotos);
         document.getElementById('asl-test-photo').addEventListener('click', diagnosePhotoFetch);
+        let findTimer = null;
+        for (const id of ['asl-find', 'asl-active-find']) {
+            document.getElementById(id).addEventListener('input', () => {
+                clearTimeout(findTimer);
+                findTimer = setTimeout(loadAndDisplayResults, 200);
+            });
+        }
 
         // Load any existing results
         loadAndDisplayResults();
@@ -1340,7 +1356,7 @@
         const nickname = (prompt('Test the photo fetch on which profile?', suggested) || '').trim();
         if (!nickname) return;
 
-        const box = document.getElementById('asl-active-res');
+        const box = document.getElementById('asl-diag');
         const trace = [];
         const render = (extra) => {
             const lines = trace.map(t => '<div style="padding:2px 0">• ' + esc(t) + '</div>').join('');
@@ -1401,12 +1417,25 @@
                 ? 'RESULT: got a saved picture.'
                 : 'RESULT: got a picture link only (download was refused). It will work now but expires in a day or two.');
             // Save it, so the profile shows the picture in the results list too.
-            const rec = (await dbGetAllResults()).find(r => r.nickname === nickname);
+            const rec = (await dbGetAllResults()).find(
+                r => (r.nickname || '').toLowerCase() === nickname.toLowerCase());
             if (rec) {
                 rec.avatar = avatar;
+                rec.checkedAt = new Date().toISOString();
                 await dbPutResults([rec]);
-                trace.push('Saved to this profile — it now shows in the results list.');
-                loadAndDisplayResults();
+                trace.push('Saved. Their card is shown below, on its own.');
+                // Narrow the list below to just this person, so the saved photo
+                // can be seen exactly as it will appear in the results.
+                for (const id of ['asl-active-find', 'asl-find']) {
+                    const fb = document.getElementById(id);
+                    if (fb) fb.value = nickname;
+                }
+                await loadAndDisplayResults();
+                if (!document.querySelector('#asl-active-res .asl-r')) {
+                    trace.push('(They are not in the Active list — their last activity is ' +
+                               'older than your threshold, or their check failed. ' +
+                               'The Results tab is filtered to them instead.)');
+                }
             } else {
                 trace.push('(This nickname is not in your results, so nothing was saved.)');
             }
@@ -1911,10 +1940,23 @@
         const active = results.filter(p => p.activityChecked && p.lastActivity && new Date(p.lastActivity) >= cutoff);
 
         // Counters
+        // "Find" boxes narrow each list by nickname without touching any of the
+        // counts or buttons, which still describe the whole set.
+        const findVal = id => ((document.getElementById(id) || {}).value || '').trim().toLowerCase();
+        const byName = (list, q) => q ? list.filter(p => (p.nickname || '').toLowerCase().includes(q)) : list;
+        const rq = findVal('asl-find');
+        const aq = findVal('asl-active-find');
+        const shownResults = byName(results, rq);
+        const shownActive = byName(active, aq);
+
         const rcount = document.getElementById('asl-rcount');
-        if (rcount) rcount.textContent = total === 0 ? 'No results yet.' : (total + ' total · ' + checkedCount + ' checked · ' + uncheckedCount + ' unchecked');
+        if (rcount) rcount.textContent = total === 0 ? 'No results yet.'
+            : (rq ? 'Showing ' + shownResults.length + ' of ' + total + ' matching "' + rq + '"'
+                  : total + ' total · ' + checkedCount + ' checked · ' + uncheckedCount + ' unchecked');
         const acount = document.getElementById('asl-active-count');
-        if (acount) acount.textContent = active.length + ' active profiles';
+        if (acount) acount.textContent = aq
+            ? 'Showing ' + shownActive.length + ' of ' + active.length + ' matching "' + aq + '"'
+            : active.length + ' active profiles';
         const rtab = document.getElementById('asl-rtab-count');
         if (rtab) rtab.textContent = total ? ('(' + total + ')') : '';
         const atab = document.getElementById('asl-atab-count');
@@ -1949,8 +1991,8 @@
         // Render both lists
         const resultsSort = (document.getElementById('asl-sort') || {}).value || 'newest';
         const activeSort = (document.getElementById('asl-active-sort') || {}).value || 'newest';
-        renderProfileList('asl-res', results, resultsSort, activityDays, true);
-        renderProfileList('asl-active-res', active, activeSort, activityDays, true);
+        renderProfileList('asl-res', shownResults, resultsSort, activityDays, true);
+        renderProfileList('asl-active-res', shownActive, activeSort, activityDays, true);
     }
 
     // =====================
