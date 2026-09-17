@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.10.0
+// @version        8.11.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -1020,6 +1020,7 @@
     }
 
     function parseActivityFromHtml(html) {
+        if (!html || typeof html !== 'string') return { date: null, error: null };
         // Fallback: try to find activity timestamps in HTML
         const timeMatches = html.match(/datetime="([^"]+)"/g);
         if (timeMatches && timeMatches.length > 0) {
@@ -1131,10 +1132,10 @@
     // they have no activity date so the Active tab can't reach them either.
     async function retryFailedChecks() {
         const results = await dbGetAllResults();
-        const failed = results.filter(p => p.activityChecked && p.activityError);
+        const failed = results.filter(p => p.activityChecked && p.activityError && !p.gone);
 
         if (failed.length === 0) {
-            setStatus('No failed checks to retry.');
+            setStatus('No retryable failures. (Deleted/404 accounts are excluded — they cannot resolve.)');
             return;
         }
 
@@ -1156,7 +1157,7 @@
     // base64 pic). Targets exactly the ones missing an image.
     async function refreshMissingPhotos() {
         const activeAll = await getActiveSet(false);
-        const missing = activeAll.filter(p => !p.avatar);
+        const missing = activeAll.filter(p => !p.avatar && !p.gone);
         if (missing.length === 0) {
             setStatus('All active profiles already have a photo.');
             return;
@@ -1294,9 +1295,9 @@
             }
 
             if (refreshAvatars) {
-                // Deliberate refresh: set the verified avatar, or clear it so a
-                // wrong/old pic becomes "?" instead of persisting.
-                p.avatar = result.avatar || '';
+                // Only touch the photo when the check actually succeeded. On an
+                // error we know nothing new, so keep whatever we already had.
+                if (!result.error) p.avatar = result.avatar || '';
             }
 
             // Handle username changes: if the profile redirected to a new
@@ -1312,8 +1313,13 @@
             p.activityChecked = true;
             p.checkedAt = Date.now();
             if (result.error) {
-                p.lastActivity = null;
+                // A failed request tells us nothing about whether they're active.
+                // Keep the existing lastActivity instead of wiping it — clearing
+                // it silently drops the profile out of the Active tab.
                 p.activityError = result.error;
+                // 404 = account deleted or renamed away; it will never resolve,
+                // so flag it and stop offering it for retry.
+                if (result.error === 404) p.gone = true;
                 errors++;
                 if (result.error === 429 || result.error === 503) {
                     console.log('[ASL] Rate limited, waiting 30s...');
@@ -1321,6 +1327,9 @@
                     await sleep(30000);
                 }
             } else if (result.date) {
+                // Successful check — clear any stale error flag
+                p.activityError = null;
+                p.gone = false;
                 p.lastActivity = result.date.toISOString();
                 if (result.date >= cutoffDate) {
                     active++;
@@ -1328,6 +1337,9 @@
                     inactive++;
                 }
             } else {
+                // Successful response, but the feed had no activity at all
+                p.activityError = null;
+                p.gone = false;
                 p.lastActivity = null;
                 inactive++;
             }
@@ -1574,7 +1586,8 @@
                 const isRecent = daysAgo <= (activityDays || 90);
                 activityLine = `<div class="m ${isRecent ? 'active' : 'inactive'}">Last active: ${dateStr} (${daysAgo}d ago)</div>`;
             } else if (p.activityError) {
-                activityLine = `<div class="m inactive">Activity check failed (${p.activityError})</div>`;
+                const label = p.gone ? 'Account deleted or renamed (404)' : 'Activity check failed (' + p.activityError + ')';
+                activityLine = `<div class="m inactive">${label}</div>`;
             } else {
                 activityLine = `<div class="m inactive">No activity found</div>`;
             }
@@ -1653,7 +1666,7 @@
             checkBtn.textContent = 'Check Activity (' + uncheckedCount + ' unchecked)';
         }
         // Retry-failed button: only show when there are errored checks
-        const failedCount = results.filter(p => p.activityChecked && p.activityError).length;
+        const failedCount = results.filter(p => p.activityChecked && p.activityError && !p.gone).length;
         const retryBtn = document.getElementById('asl-retry-failed');
         if (retryBtn) {
             retryBtn.style.display = failedCount > 0 ? 'block' : 'none';
