@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.15.0
+// @version        8.16.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -428,7 +428,7 @@
                     <label class="fl" style="margin:4px 0"><input type="checkbox" id="asl-recheck-skip-pics" checked> Skip profiles that already have a saved pic</label>
                     <button class="asl-b" id="asl-recheck-last" style="background:#d80;color:#fff;margin-top:0">Re-check Range (refresh pics)</button>
                     <button class="asl-b" id="asl-fix-photos" style="background:#47a;color:#fff;display:none">Refresh Missing Photos</button>
-                    <button class="asl-b" id="asl-test-photo" style="background:#555;color:#fff">Test Photo Fetch (1 profile)</button>
+                    <button class="asl-b" id="asl-test-photo" style="background:#555;color:#fff">Test Photos (first 5 missing)</button>
                     <button class="asl-b" id="asl-active-csv" style="background:#2a6;color:#fff">Export Active to CSV</button>
                     <div id="asl-diag"></div>
                     <div id="asl-active-count"></div>
@@ -1346,112 +1346,121 @@
         }
     }
 
-    // Runs the whole photo pipeline against ONE profile and prints every step in
-    // plain English, so a failure can be pinned down from the panel without
-    // reading the console.
-    async function diagnosePhotoFetch() {
-        const activeAll = await getActiveSet(false);
-        const missing = activeAll.filter(p => !p.avatar && !p.gone && !p.restricted);
-        const suggested = missing.length ? missing[0].nickname : (activeAll[0] || {}).nickname || '';
-        const nickname = (prompt('Test the photo fetch on which profile?', suggested) || '').trim();
-        if (!nickname) return;
-
-        const box = document.getElementById('asl-diag');
-        const trace = [];
-        const render = (extra) => {
-            const lines = trace.map(t => '<div style="padding:2px 0">• ' + esc(t) + '</div>').join('');
-            box.innerHTML = '<div style="background:#111;color:#ddd;padding:10px;' +
-                'border-radius:6px;font:12px/1.5 monospace;word-break:break-all">' +
-                '<div style="font-weight:bold;margin-bottom:6px">Photo test: ' + esc(nickname) + '</div>' +
-                lines + (extra || '') + '</div>';
-        };
-
-        trace.push('Starting…');
-        render();
-
+    // Fetch one profile's picture, recording each step. Returns the picture
+    // (base64 where the download succeeded, otherwise the bare URL) or null.
+    async function photoPipeline(nickname, trace) {
+        const note = m => { if (trace) trace.push(m); };
         const profileUrl = 'https://fetlife.com/' + nickname;
         let avatar = null;
+        let candidateCount = null;
         try {
             const resp = await fetchActivityRaw(profileUrl);
-            trace.push('Activity feed: HTTP ' + resp.status +
-                       (resp.finalUrl && resp.finalUrl !== profileUrl + '/activity'
-                        ? ' (redirected to ' + resp.finalUrl + ')' : ''));
+            note('Activity feed: HTTP ' + resp.status);
             if (isLockedOut(resp)) {
-                trace.push('FetLife has locked you out — wait, then try again.');
-                render();
-                return;
+                note('FetLife has locked you out — stopping.');
+                return { avatar: null, lockedOut: true, candidateCount };
             }
-            render();
             if (resp.ok) {
                 let data = null;
                 try { data = JSON.parse(resp.responseText); }
-                catch(e) { trace.push('Feed came back as a web page, not data (' + (resp.responseText || '').length + ' characters)'); }
+                catch(e) { note('Feed came back as a web page, not data (' + (resp.responseText || '').length + ' chars)'); }
                 const canonical = nicknameFromUrl(resp.finalUrl) || nickname;
                 const url = data ? findAvatarForNickname(data, canonical, 0) : null;
                 if (url && isMemberPicture(url.replace(/\\\//g, '/'))) {
-                    trace.push('Feed has their picture: ' + url.replace(/\\\//g, '/').substring(0, 80));
-                    render();
+                    note('Feed has their picture');
                     avatar = await fetchImageAsBase64(url.replace(/\\\//g, '/'), trace) || null;
                 } else {
-                    trace.push('Feed has no picture for them — falling back to the profile page');
+                    note('Feed has no picture — trying the profile page');
                 }
             }
-            render();
             if (!avatar) {
-                // Show what the page actually offered, so a wrong pick is
-                // obvious instead of silent.
                 const pg = await gmFetch(profileUrl, { 'Accept': 'text/html' });
-                trace.push('Profile page: HTTP ' + pg.status + ', ' + ((pg.responseText || '').length) + ' characters');
+                note('Profile page: HTTP ' + pg.status + ', ' + ((pg.responseText || '').length) + ' chars');
                 const cands = collectAvatarCandidates(pg.responseText || '');
-                trace.push('Member pictures on that page: ' + cands.length);
-                cands.slice(0, 4).forEach((c, i) => trace.push('  ' + (i + 1) + '. ' + c.substring(0, 90)));
-                render();
-                avatar = await fetchAvatarFromProfile(profileUrl, trace);
+                candidateCount = cands.length;
+                note('Member pictures on that page: ' + cands.length);
+                cands.slice(0, 3).forEach((c, i) => note('   ' + (i + 1) + '. ' + c.substring(0, 95)));
+                if (cands.length) {
+                    note('Using: ' + cands[0].substring(0, 95));
+                    avatar = await fetchImageAsBase64(cands[0], trace) || cands[0];
+                }
             }
         } catch(e) {
-            trace.push('Error: ' + e.message);
+            note('Error: ' + e.message);
+        }
+        return { avatar, lockedOut: false, candidateCount };
+    }
+
+    // Works straight off the list — takes the profiles that are currently
+    // missing a photo, fetches each one, saves what it finds, and shows the
+    // pictures side by side with a link to each profile. No usernames to type
+    // and nothing to look up: what you see is what the list will show.
+    async function diagnosePhotoFetch() {
+        const box = document.getElementById('asl-diag');
+        const activeAll = await getActiveSet(false);
+        let targets = activeAll.filter(p => !p.avatar && !p.gone && !p.restricted);
+        if (!targets.length) targets = activeAll.slice(0, 5);
+        if (!targets.length) {
+            box.innerHTML = '<div style="padding:8px;color:#999">No active profiles to test yet.</div>';
+            return;
+        }
+        targets = targets.slice(0, 5);
+
+        const minD = (parseFloat(document.getElementById('asl-act-min').value) || 3) * 1000;
+        const maxD = (parseFloat(document.getElementById('asl-act-max').value) || 6) * 1000;
+
+        const rows = targets.map(p => ({ nickname: p.nickname, trace: [], avatar: null, done: false }));
+        const render = (headline) => {
+            const cards = rows.map(r => {
+                const pic = r.avatar
+                    ? '<img src="' + r.avatar.replace(/"/g, '&quot;') + '" style="width:90px;height:90px;object-fit:cover;border-radius:6px;display:block">'
+                    : '<div style="width:90px;height:90px;border-radius:6px;background:#333;color:#888;display:flex;align-items:center;justify-content:center;font-size:22px">' +
+                      (r.done ? '?' : '…') + '</div>';
+                return '<div style="display:flex;gap:10px;padding:8px 0;border-top:1px solid #333">' +
+                    '<div>' + pic + '</div>' +
+                    '<div style="flex:1;min-width:0">' +
+                    '<a href="https://fetlife.com/' + esc(r.nickname) + '" target="_blank" ' +
+                    'style="color:#6bf;font-weight:bold">' + esc(r.nickname) + ' — open profile to compare →</a>' +
+                    '<div style="color:#aaa;font-size:11px;margin-top:3px">' +
+                    r.trace.map(t => '<div>' + esc(t) + '</div>').join('') + '</div></div></div>';
+            }).join('');
+            box.innerHTML = '<div style="background:#111;color:#ddd;padding:10px;border-radius:6px;' +
+                'font:12px/1.5 monospace;word-break:break-all;max-height:420px;overflow:auto">' +
+                '<div style="font-weight:bold;margin-bottom:4px">Photo test — ' + esc(headline) + '</div>' +
+                cards + '</div>';
+        };
+
+        render('checking ' + rows.length + ' profiles missing a photo…');
+
+        const fixed = [];
+        for (let i = 0; i < rows.length; i++) {
+            const r = rows[i];
+            const res = await photoPipeline(r.nickname, r.trace);
+            r.avatar = res.avatar;
+            r.done = true;
+            if (res.avatar) {
+                const rec = targets.find(t => t.nickname === r.nickname);
+                rec.avatar = res.avatar;
+                rec.checkedAt = new Date().toISOString();
+                fixed.push(rec);
+            }
+            render((i + 1) + ' of ' + rows.length + ' done');
+            if (res.lockedOut) {
+                render('stopped — FetLife locked you out');
+                break;
+            }
+            if (i < rows.length - 1) await sleep(randomDelay(minD, maxD));
         }
 
-        if (avatar) {
-            trace.push(avatar.startsWith('data:')
-                ? 'RESULT: got a saved picture.'
-                : 'RESULT: got a picture link only (download was refused). It will work now but expires in a day or two.');
-            // Save it, so the profile shows the picture in the results list too.
-            const rec = (await dbGetAllResults()).find(
-                r => (r.nickname || '').toLowerCase() === nickname.toLowerCase());
-            if (rec) {
-                rec.avatar = avatar;
-                rec.checkedAt = new Date().toISOString();
-                await dbPutResults([rec]);
-                trace.push('Saved. Their card is shown below, on its own.');
-                // Narrow the list below to just this person, so the saved photo
-                // can be seen exactly as it will appear in the results.
-                for (const id of ['asl-active-find', 'asl-find']) {
-                    const fb = document.getElementById(id);
-                    if (fb) fb.value = nickname;
-                }
-                await loadAndDisplayResults();
-                if (!document.querySelector('#asl-active-res .asl-r')) {
-                    trace.push('(They are not in the Active list — their last activity is ' +
-                               'older than your threshold, or their check failed. ' +
-                               'The Results tab is filtered to them instead.)');
-                }
-            } else {
-                trace.push('(This nickname is not in your results, so nothing was saved.)');
-            }
-            // Side by side with their real profile, so the picture can be checked.
-            const extra = '<div style="margin-top:10px;display:flex;gap:10px;align-items:flex-start">' +
-                '<img src="' + avatar.replace(/"/g, '&quot;') + '" style="width:110px;border-radius:6px" alt="">' +
-                '<a href="' + esc(profileUrl) + '" target="_blank" style="color:#6bf">Open ' +
-                esc(nickname) + '\'s profile to compare →</a></div>';
-            render(extra);
-        } else {
-            trace.push('RESULT: no picture found. The steps above show where it stopped.');
-            render('<div style="margin-top:8px"><a href="' + esc(profileUrl) +
-                   '" target="_blank" style="color:#6bf">Open ' + esc(nickname) +
-                   '\'s profile →</a></div>');
+        if (fixed.length) {
+            await dbPutResults(fixed);
+            await loadAndDisplayResults();
         }
+        const got = rows.filter(r => r.avatar).length;
+        render(got + ' of ' + rows.length + ' got a picture' +
+               (fixed.length ? ' — saved to the list below' : ''));
     }
+
 
     async function recheckByAge() {
         const minAge = parseInt(document.getElementById('asl-recheck-amin').value) || 18;
