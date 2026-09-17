@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        9.1.0
+// @version        9.2.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -1411,24 +1411,45 @@
 
     // Fetch one profile's picture, recording each step. Returns the picture
     // (base64 where the download succeeded, otherwise the bare URL) or null.
+    //
+    // This already asks for /activity to find the picture, so it reads the
+    // dates out of the same response — refreshing when someone was last
+    // active costs nothing extra here, and a stale date is as misleading as
+    // a stale photo.
     async function photoPipeline(nickname, trace) {
         const note = m => { if (trace) trace.push(m); };
         const profileUrl = 'https://fetlife.com/' + nickname;
         let avatar = null;
         let sourceUrl = null;
+        let lastActivity = null;
+        let canonicalNick = null;
         let candidateCount = null;
         try {
             const resp = await fetchActivityRaw(profileUrl);
             note('Activity feed: HTTP ' + resp.status);
             if (isLockedOut(resp)) {
                 note('FetLife has locked you out — stopping.');
-                return { avatar: null, sourceUrl: null, lockedOut: true, candidateCount };
+                return { avatar: null, sourceUrl: null, lastActivity: null,
+                         canonicalNick: null, lockedOut: true, candidateCount };
             }
             if (resp.ok) {
                 let data = null;
                 try { data = JSON.parse(resp.responseText); }
                 catch(e) { note('Feed came back as a web page, not data (' + (resp.responseText || '').length + ' chars)'); }
                 const canonical = nicknameFromUrl(resp.finalUrl) || nickname;
+                canonicalNick = canonical;
+                if (data && data.story_groups) {
+                    for (const group of data.story_groups) {
+                        for (const story of (group.stories || [])) {
+                            if (!story.created_at) continue;
+                            const d = new Date(story.created_at);
+                            if (!isNaN(d.getTime()) && (!lastActivity || d > lastActivity)) lastActivity = d;
+                        }
+                    }
+                } else if (!data) {
+                    lastActivity = parseActivityFromHtml(resp.responseText).date;
+                }
+                if (lastActivity) note('Last active: ' + lastActivity.toDateString());
                 const url = data ? findAvatarForNickname(data, canonical, 0) : null;
                 if (url && isMemberPicture(url.replace(/\\\//g, '/'))) {
                     note('Feed has their picture');
@@ -1454,7 +1475,8 @@
         } catch(e) {
             note('Error: ' + e.message);
         }
-        return { avatar, sourceUrl, lockedOut: false, candidateCount };
+        return { avatar, sourceUrl, lastActivity, canonicalNick,
+                 lockedOut: false, candidateCount };
     }
 
     async function recheckByAge() {
@@ -1890,15 +1912,23 @@
     // Without this, every redraw re-queues the same hopeless profiles and the
     // queue never drains.
     const PHOTO_RETRY_MS = 7 * 86400000;
+    // How old an activity date may get before a visible card refreshes it.
+    // Profiles never checked at all are left to the Check Activity button,
+    // which is the deliberate, interruptible job with its own progress bar.
+    const STALE_ACTIVITY_MS = 14 * 86400000;
+    // However a refresh turns out, don't attempt the same profile again for a
+    // day. Otherwise a profile that cannot be refreshed re-queues on every
+    // redraw and the worker never gets past it.
+    const REFRESH_COOLDOWN_MS = 86400000;
 
-    function queuePhoto(nickname, placeholder, lastTried) {
+    function queuePhoto(nickname, placeholder, lastTried, card, activityDays) {
         if (!nickname || photoQueued.has(nickname)) return;
         if (lastTried && Date.now() - new Date(lastTried).getTime() < PHOTO_RETRY_MS) {
             if (placeholder) placeholder.title = 'No photo found for this profile';
             return;
         }
         photoQueued.add(nickname);
-        photoQueue.push({ nickname, placeholder });
+        photoQueue.push({ nickname, placeholder, card, activityDays });
         setPlaceholderState(placeholder, 'waiting');
         updatePhotoStatus();
         startPhotoWorker();
@@ -1907,7 +1937,7 @@
     // The card itself says where it is up to, so "which ones are loading?" is
     // answerable by looking at the list rather than inferring it.
     function setPlaceholderState(el, state) {
-        if (!el) return;
+        if (!el || el.tagName === 'IMG') return;
         if (state === 'waiting') {
             el.textContent = '\u22ef';
             el.style.color = '#667';
@@ -1948,17 +1978,23 @@
                 try { res = await photoPipeline(job.nickname, null); }
                 catch(e) { console.error('[ASL] photo fill failed for', job.nickname, e); }
                 if (res && res.lockedOut) { lockoutDetected = true; break; }
+                if (res && res.lastActivity) await saveActivity(job.nickname, res.lastActivity);
                 let saved = false;
                 if (res && res.avatar) {
                     saved = await saveAvatar(job.nickname, res.avatar, res.sourceUrl);
                 }
-                if (saved) {
-                    if (job.placeholder && job.placeholder.isConnected) {
-                        job.placeholder.replaceWith(makeAvatarImg(job.nickname, res.avatar));
-                    }
-                } else {
+                if (!saved) {
                     setPlaceholderState(job.placeholder, 'none');
                     await markPhotoTried(job.nickname);
+                }
+                await stampRefreshed(job.nickname);
+                // Redraw the card from the stored record so the picture AND the
+                // refreshed "last active" line are both current.
+                if (job.card && job.card.isConnected) {
+                    const fresh = await dbGetResult(job.nickname);
+                    if (fresh) job.card.replaceWith(buildProfileCard(fresh, job.activityDays));
+                } else if (saved && job.placeholder && job.placeholder.isConnected) {
+                    job.placeholder.replaceWith(makeAvatarImg(job.nickname, res.avatar));
                 }
                 updatePhotoStatus();
                 if (photoQueue.length) await sleep(photoDelay());
@@ -1967,6 +2003,32 @@
             photoWorkerRunning = false;
             updatePhotoStatus();
         }
+    }
+
+    // Record a freshly-read activity date from the same request the photo
+    // came out of, so the list's "last active" does not drift out of date
+    // while the photos are being brought up to date.
+    async function saveActivity(nickname, date) {
+        try {
+            const rec = await dbGetResult(nickname);
+            if (!rec) return;
+            const known = rec.lastActivity ? new Date(rec.lastActivity) : null;
+            if (known && known >= date) return;
+            rec.lastActivity = date.toISOString();
+            rec.activityChecked = true;
+            rec.checkedAt = new Date().toISOString();
+            rec.activityError = null;
+            await dbPutResults([rec]);
+        } catch(e) { console.error('[ASL] saveActivity failed:', e); }
+    }
+
+    async function stampRefreshed(nickname) {
+        try {
+            const rec = await dbGetResult(nickname);
+            if (!rec) return;
+            rec.refreshTried = new Date().toISOString();
+            await dbPutResults([rec]);
+        } catch(e) { console.error('[ASL] stampRefreshed failed:', e); }
     }
 
     async function markPhotoTried(nickname) {
@@ -1985,9 +2047,11 @@
         if (lockoutDetected) {
             el.textContent = 'Photo loading stopped — FetLife locked you out.';
         } else if (activityCheckRunning && left) {
-            el.textContent = 'Photos paused until the activity check finishes — ' + left + ' waiting.';
+            el.textContent = 'Background refresh paused until the activity check finishes — ' +
+                left + ' waiting.';
         } else if (left) {
-            el.textContent = 'Loading photos… ' + left + ' to go. The blue dot is the one loading now.';
+            el.textContent = 'Refreshing photos & activity… ' + left +
+                ' to go. The blue dot is the one loading now.';
         } else {
             el.textContent = '';
         }
@@ -2015,14 +2079,25 @@
         avLink.className = 'av';
         avLink.href = p.url;
         avLink.target = '_blank';
+        let ph = null;
         if (p.avatar) {
             avLink.appendChild(makeAvatarImg(p.nickname, p.avatar));
         } else {
             // No picture yet — show a placeholder and have the background
             // filler replace it in place once it has one.
-            const ph = makePlaceholder();
+            ph = makePlaceholder();
             avLink.appendChild(ph);
-            queuePhoto(p.nickname, ph, p.photoTried);
+        }
+        // Refresh anything missing a picture, and anything whose activity date
+        // has gone stale. One request answers both, so a card that needs either
+        // gets brought fully up to date.
+        const staleAfter = Date.now() - STALE_ACTIVITY_MS;
+        const stale = p.activityChecked && p.checkedAt &&
+                      new Date(p.checkedAt).getTime() < staleAfter;
+        const cooling = p.refreshTried &&
+            Date.now() - new Date(p.refreshTried).getTime() < REFRESH_COOLDOWN_MS;
+        if ((!p.avatar || stale) && !cooling) {
+            queuePhoto(p.nickname, ph, p.avatar ? null : p.photoTried, d, activityDays);
         }
         const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
         let activityLine = '';
