@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.17.0
+// @version        9.0.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -68,6 +68,16 @@
             const store = tx.objectStore(STORE_NAME);
             const req = store.getAll();
             req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbGetResult(nickname) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readonly');
+            const req = tx.objectStore(STORE_NAME).get(nickname);
+            req.onsuccess = () => resolve(req.result || null);
             req.onerror = () => reject(req.error);
         });
     }
@@ -427,10 +437,8 @@
                     </div>
                     <label class="fl" style="margin:4px 0"><input type="checkbox" id="asl-recheck-skip-pics" checked> Skip profiles that already have a saved pic</label>
                     <button class="asl-b" id="asl-recheck-last" style="background:#d80;color:#fff;margin-top:0">Re-check Range (refresh pics)</button>
-                    <button class="asl-b" id="asl-fix-photos" style="background:#47a;color:#fff;display:none">Refresh Missing Photos</button>
-                    <button class="asl-b" id="asl-test-photo" style="background:#555;color:#fff">Test Photos (first 5 missing)</button>
                     <button class="asl-b" id="asl-active-csv" style="background:#2a6;color:#fff">Export Active to CSV</button>
-                    <div id="asl-diag"></div>
+                    <div id="asl-photo-status" style="font-size:11px;color:#89a;margin:4px 0"></div>
                     <div id="asl-active-count"></div>
                     <div id="asl-active-res"></div>
                 </div>
@@ -474,8 +482,6 @@
         document.getElementById('asl-sort').addEventListener('change', loadAndDisplayResults);
         document.getElementById('asl-active-sort').addEventListener('change', loadAndDisplayResults);
         document.getElementById('asl-active-csv').addEventListener('click', exportActiveCSV);
-        document.getElementById('asl-fix-photos').addEventListener('click', refreshMissingPhotos);
-        document.getElementById('asl-test-photo').addEventListener('click', diagnosePhotoFetch);
         let findTimer = null;
         for (const id of ['asl-find', 'asl-active-find']) {
             document.getElementById(id).addEventListener('input', () => {
@@ -1373,23 +1379,6 @@
         setTimeout(() => startActivityCheck(true, failed), 500);
     }
 
-    // Re-fetch photos for active profiles that currently show "?" (no saved
-    // base64 pic). Targets exactly the ones missing an image.
-    async function refreshMissingPhotos() {
-        const activeAll = await getActiveSet(false);
-        const missing = activeAll.filter(p => !p.avatar && !p.gone && !p.restricted);
-        if (missing.length === 0) {
-            setStatus('All active profiles already have a photo.');
-            return;
-        }
-        console.log('[ASL] Refreshing photos for', missing.length, 'active profiles');
-        for (const p of missing) { p.activityChecked = false; p.checkedAt = null; }
-        await dbPutResults(missing);
-        setStatus('Refreshing photos for ' + missing.length + ' active profiles...');
-        await loadAndDisplayResults();
-        setTimeout(() => startActivityCheck(true, missing), 500);
-    }
-
     // v8.13.0 trusted the og:image tag, which on FetLife is their own site logo
     // rather than the member's photo — so some profiles ended up holding an
     // identical picture. A real avatar is unique to one person, so any image
@@ -1426,13 +1415,14 @@
         const note = m => { if (trace) trace.push(m); };
         const profileUrl = 'https://fetlife.com/' + nickname;
         let avatar = null;
+        let sourceUrl = null;
         let candidateCount = null;
         try {
             const resp = await fetchActivityRaw(profileUrl);
             note('Activity feed: HTTP ' + resp.status);
             if (isLockedOut(resp)) {
                 note('FetLife has locked you out — stopping.');
-                return { avatar: null, lockedOut: true, candidateCount };
+                return { avatar: null, sourceUrl: null, lockedOut: true, candidateCount };
             }
             if (resp.ok) {
                 let data = null;
@@ -1442,7 +1432,8 @@
                 const url = data ? findAvatarForNickname(data, canonical, 0) : null;
                 if (url && isMemberPicture(url.replace(/\\\//g, '/'))) {
                     note('Feed has their picture');
-                    avatar = await fetchImageAsBase64(url.replace(/\\\//g, '/'), trace) || null;
+                    sourceUrl = url.replace(/\\\//g, '/');
+                    avatar = await fetchImageAsBase64(sourceUrl, trace) || null;
                 } else {
                     note('Feed has no picture — trying the profile page');
                 }
@@ -1456,85 +1447,15 @@
                 const chosen = pickOwnerAvatar(pg.responseText || '', nickname, trace);
                 if (chosen) {
                     note('Using: ' + chosen.substring(0, 95));
+                    sourceUrl = chosen;
                     avatar = await fetchImageAsBase64(chosen, trace) || chosen;
                 }
             }
         } catch(e) {
             note('Error: ' + e.message);
         }
-        return { avatar, lockedOut: false, candidateCount };
+        return { avatar, sourceUrl, lockedOut: false, candidateCount };
     }
-
-    // Works straight off the list — takes the profiles that are currently
-    // missing a photo, fetches each one, saves what it finds, and shows the
-    // pictures side by side with a link to each profile. No usernames to type
-    // and nothing to look up: what you see is what the list will show.
-    async function diagnosePhotoFetch() {
-        const box = document.getElementById('asl-diag');
-        const activeAll = await getActiveSet(false);
-        let targets = activeAll.filter(p => !p.avatar && !p.gone && !p.restricted);
-        if (!targets.length) targets = activeAll.slice(0, 5);
-        if (!targets.length) {
-            box.innerHTML = '<div style="padding:8px;color:#999">No active profiles to test yet.</div>';
-            return;
-        }
-        targets = targets.slice(0, 5);
-
-        const minD = (parseFloat(document.getElementById('asl-act-min').value) || 3) * 1000;
-        const maxD = (parseFloat(document.getElementById('asl-act-max').value) || 6) * 1000;
-
-        const rows = targets.map(p => ({ nickname: p.nickname, trace: [], avatar: null, done: false }));
-        const render = (headline) => {
-            const cards = rows.map(r => {
-                const pic = r.avatar
-                    ? '<img src="' + r.avatar.replace(/"/g, '&quot;') + '" style="width:90px;height:90px;object-fit:cover;border-radius:6px;display:block">'
-                    : '<div style="width:90px;height:90px;border-radius:6px;background:#333;color:#888;display:flex;align-items:center;justify-content:center;font-size:22px">' +
-                      (r.done ? '?' : '…') + '</div>';
-                return '<div style="display:flex;gap:10px;padding:8px 0;border-top:1px solid #333">' +
-                    '<div>' + pic + '</div>' +
-                    '<div style="flex:1;min-width:0">' +
-                    '<a href="https://fetlife.com/' + esc(r.nickname) + '" target="_blank" ' +
-                    'style="color:#6bf;font-weight:bold">' + esc(r.nickname) + ' — open profile to compare →</a>' +
-                    '<div style="color:#aaa;font-size:11px;margin-top:3px">' +
-                    r.trace.map(t => '<div>' + esc(t) + '</div>').join('') + '</div></div></div>';
-            }).join('');
-            box.innerHTML = '<div style="background:#111;color:#ddd;padding:10px;border-radius:6px;' +
-                'font:12px/1.5 monospace;word-break:break-all;max-height:420px;overflow:auto">' +
-                '<div style="font-weight:bold;margin-bottom:4px">Photo test — ' + esc(headline) + '</div>' +
-                cards + '</div>';
-        };
-
-        render('checking ' + rows.length + ' profiles missing a photo…');
-
-        const fixed = [];
-        for (let i = 0; i < rows.length; i++) {
-            const r = rows[i];
-            const res = await photoPipeline(r.nickname, r.trace);
-            r.avatar = res.avatar;
-            r.done = true;
-            if (res.avatar) {
-                const rec = targets.find(t => t.nickname === r.nickname);
-                rec.avatar = res.avatar;
-                rec.checkedAt = new Date().toISOString();
-                fixed.push(rec);
-            }
-            render((i + 1) + ' of ' + rows.length + ' done');
-            if (res.lockedOut) {
-                render('stopped — FetLife locked you out');
-                break;
-            }
-            if (i < rows.length - 1) await sleep(randomDelay(minD, maxD));
-        }
-
-        if (fixed.length) {
-            await dbPutResults(fixed);
-            await loadAndDisplayResults();
-        }
-        const got = rows.filter(r => r.avatar).length;
-        render(got + ' of ' + rows.length + ' got a picture' +
-               (fixed.length ? ' — saved to the list below' : ''));
-    }
-
 
     async function recheckByAge() {
         const minAge = parseInt(document.getElementById('asl-recheck-amin').value) || 18;
@@ -1628,6 +1549,10 @@
         let inactive = 0;
         let errors = 0;
 
+        // The photo filler steps aside while this runs, so the two never make
+        // requests at the same time.
+        activityCheckRunning = true;
+        try {
         for (const p of unchecked) {
             if (activityCheckAbort) {
                 console.log('[ASL] Activity check stopped by user.');
@@ -1725,6 +1650,11 @@
                 console.log('[ASL] Next activity check in', Math.round(delay/1000), 'seconds');
                 await sleep(delay);
             }
+        }
+
+        } finally {
+            activityCheckRunning = false;
+            startPhotoWorker();
         }
 
         stopBtn.style.display = 'none';
@@ -1914,15 +1844,117 @@
                     for (const p of toClear) p.avatar = '';
                     await dbPutResults(toClear);
                     console.log('[ASL] Cleared', toClear.length, 'dead avatar URLs');
-                    const fixBtn = document.getElementById('asl-fix-photos');
-                    if (fixBtn) {
-                        const n = parseInt((fixBtn.textContent.match(/\((\d+)\)/) || [])[1] || '0');
-                        fixBtn.textContent = 'Refresh Missing Photos (' + (n + toClear.length) + ')';
-                        fixBtn.style.display = 'block';
-                    }
                 }
             } catch(e) { console.error('[ASL] markAvatarBroken failed:', e); }
         }, 1500);
+    }
+
+    // =====================
+    // AUTOMATIC PHOTO FILLING
+    // =====================
+    // Photos fill themselves in for whatever is on screen. There is nothing to
+    // click and nothing to know: a card drawn without a picture puts itself in
+    // a queue, and the queue is worked through slowly in the background.
+
+    // The rule that keeps the wrong face off a profile: a picture belongs to
+    // one person. FetLife draws YOUR avatar in the header of every page, so it
+    // appears on everyone's profile — and if an attachment ever gets offered
+    // for a second person, it is chrome, and refused from then on.
+    async function saveAvatar(nickname, avatar, sourceUrl) {
+        const id = sourceUrl ? attachmentId(sourceUrl) : null;
+        if (id) {
+            const owner = readJson(ID_OWNER_KEY, {});
+            if (owner[id] && owner[id] !== nickname) {
+                const chrome = new Set(readJson(CHROME_IDS_KEY, []));
+                chrome.add(id);
+                writeJson(CHROME_IDS_KEY, [...chrome]);
+                console.log('[ASL] Refused shared picture', id, 'for', nickname);
+                return false;
+            }
+            owner[id] = nickname;
+            writeJson(ID_OWNER_KEY, owner);
+        }
+        const rec = await dbGetResult(nickname);
+        if (!rec) return false;
+        rec.avatar = avatar;
+        await dbPutResults([rec]);
+        return true;
+    }
+
+    const photoQueue = [];
+    const photoQueued = new Set();
+    let photoWorkerRunning = false;
+    let activityCheckRunning = false;
+
+    function queuePhoto(nickname, placeholder) {
+        if (!nickname || photoQueued.has(nickname)) return;
+        photoQueued.add(nickname);
+        photoQueue.push({ nickname, placeholder });
+        startPhotoWorker();
+    }
+
+    function photoDelay() {
+        const el = id => (document.getElementById(id) || {}).value;
+        const min = (parseFloat(el('asl-act-min')) || 3) * 1000;
+        const max = (parseFloat(el('asl-act-max')) || 6) * 1000;
+        return randomDelay(min, Math.max(max, min + 1));
+    }
+
+    async function startPhotoWorker() {
+        if (photoWorkerRunning) return;
+        photoWorkerRunning = true;
+        try {
+            while (photoQueue.length && !lockoutDetected) {
+                // The activity check is the job the user actually asked for.
+                // Never make requests alongside it.
+                if (activityCheckRunning) { await sleep(5000); continue; }
+                const job = photoQueue.shift();
+                photoQueued.delete(job.nickname);
+                // Skip anything scrolled or filtered off the list since queuing.
+                if (job.placeholder && !job.placeholder.isConnected) continue;
+                let res;
+                try { res = await photoPipeline(job.nickname, null); }
+                catch(e) { console.error('[ASL] photo fill failed for', job.nickname, e); continue; }
+                if (res.lockedOut) { lockoutDetected = true; break; }
+                if (res.avatar && await saveAvatar(job.nickname, res.avatar, res.sourceUrl)) {
+                    if (job.placeholder && job.placeholder.isConnected) {
+                        job.placeholder.replaceWith(makeAvatarImg(job.nickname, res.avatar));
+                    }
+                    updatePhotoStatus();
+                }
+                if (photoQueue.length) await sleep(photoDelay());
+            }
+        } finally {
+            photoWorkerRunning = false;
+            updatePhotoStatus();
+        }
+    }
+
+    function updatePhotoStatus() {
+        const el = document.getElementById('asl-photo-status');
+        if (!el) return;
+        if (lockoutDetected) {
+            el.textContent = 'Photo loading paused — FetLife locked you out.';
+        } else if (photoQueue.length) {
+            el.textContent = 'Loading photos in the background… ' + photoQueue.length + ' to go.';
+        } else {
+            el.textContent = '';
+        }
+    }
+
+    function makeAvatarImg(nickname, src) {
+        const img = document.createElement('img');
+        img.src = src;
+        img.alt = '';
+        img.loading = 'lazy';
+        img.addEventListener('error', function() {
+            const ph = makePlaceholder();
+            this.replaceWith(ph);
+            // The stored link has expired. Drop it and let the filler redo it.
+            markAvatarBroken(nickname);
+            queuePhoto(nickname, ph);
+        });
+        return img;
     }
 
     function buildProfileCard(p, activityDays) {
@@ -1933,19 +1965,13 @@
         avLink.href = p.url;
         avLink.target = '_blank';
         if (p.avatar) {
-            const img = document.createElement('img');
-            img.src = p.avatar;
-            img.alt = '';
-            img.loading = 'lazy';
-            img.addEventListener('error', function() {
-                this.replaceWith(makePlaceholder());
-                // The stored URL is dead (expired). Clear it so this profile
-                // is correctly counted as "missing a photo".
-                markAvatarBroken(p.nickname);
-            });
-            avLink.appendChild(img);
+            avLink.appendChild(makeAvatarImg(p.nickname, p.avatar));
         } else {
-            avLink.appendChild(makePlaceholder());
+            // No picture yet — show a placeholder and have the background
+            // filler replace it in place once it has one.
+            const ph = makePlaceholder();
+            avLink.appendChild(ph);
+            queuePhoto(p.nickname, ph);
         }
         const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
         let activityLine = '';
@@ -2060,14 +2086,6 @@
         }
         const csvBtn = document.getElementById('asl-csv');
         if (csvBtn) csvBtn.style.display = total ? 'block' : 'none';
-        // Missing-photo button: active profiles with no stored photo at all
-        // (empty, or cleared because the URL was found dead on render)
-        const noPicCount = active.filter(p => !p.avatar).length;
-        const fixBtn = document.getElementById('asl-fix-photos');
-        if (fixBtn) {
-            fixBtn.style.display = noPicCount > 0 ? 'block' : 'none';
-            fixBtn.textContent = 'Refresh Missing Photos (' + noPicCount + ')';
-        }
         const clearBtn = document.getElementById('asl-clear');
         if (clearBtn) clearBtn.style.display = total ? 'block' : 'none';
 
