@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.11.0
+// @version        8.11.1
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -1132,10 +1132,10 @@
     // they have no activity date so the Active tab can't reach them either.
     async function retryFailedChecks() {
         const results = await dbGetAllResults();
-        const failed = results.filter(p => p.activityChecked && p.activityError && !p.gone);
+        const failed = results.filter(p => p.activityChecked && p.activityError && !p.gone && !p.restricted);
 
         if (failed.length === 0) {
-            setStatus('No retryable failures. (Deleted/404 accounts are excluded — they cannot resolve.)');
+            setStatus('No retryable failures. (Deleted 404s and private 401s are excluded — they cannot resolve.)');
             return;
         }
 
@@ -1157,7 +1157,7 @@
     // base64 pic). Targets exactly the ones missing an image.
     async function refreshMissingPhotos() {
         const activeAll = await getActiveSet(false);
-        const missing = activeAll.filter(p => !p.avatar && !p.gone);
+        const missing = activeAll.filter(p => !p.avatar && !p.gone && !p.restricted);
         if (missing.length === 0) {
             setStatus('All active profiles already have a photo.');
             return;
@@ -1317,9 +1317,11 @@
                 // Keep the existing lastActivity instead of wiping it — clearing
                 // it silently drops the profile out of the Active tab.
                 p.activityError = result.error;
-                // 404 = account deleted or renamed away; it will never resolve,
-                // so flag it and stop offering it for retry.
+                // Permanent per-profile conditions — retrying can never help:
+                //  404 = account deleted or renamed away
+                //  401/403 = activity feed is private/restricted to us
                 if (result.error === 404) p.gone = true;
+                if (result.error === 401 || result.error === 403) p.restricted = true;
                 errors++;
                 if (result.error === 429 || result.error === 503) {
                     console.log('[ASL] Rate limited, waiting 30s...');
@@ -1330,6 +1332,7 @@
                 // Successful check — clear any stale error flag
                 p.activityError = null;
                 p.gone = false;
+                p.restricted = false;
                 p.lastActivity = result.date.toISOString();
                 if (result.date >= cutoffDate) {
                     active++;
@@ -1340,6 +1343,7 @@
                 // Successful response, but the feed had no activity at all
                 p.activityError = null;
                 p.gone = false;
+                p.restricted = false;
                 p.lastActivity = null;
                 inactive++;
             }
@@ -1586,7 +1590,9 @@
                 const isRecent = daysAgo <= (activityDays || 90);
                 activityLine = `<div class="m ${isRecent ? 'active' : 'inactive'}">Last active: ${dateStr} (${daysAgo}d ago)</div>`;
             } else if (p.activityError) {
-                const label = p.gone ? 'Account deleted or renamed (404)' : 'Activity check failed (' + p.activityError + ')';
+                const label = p.gone ? 'Account deleted or renamed (404)'
+                            : p.restricted ? 'Activity is private (' + p.activityError + ')'
+                            : 'Activity check failed (' + p.activityError + ')';
                 activityLine = `<div class="m inactive">${label}</div>`;
             } else {
                 activityLine = `<div class="m inactive">No activity found</div>`;
@@ -1666,7 +1672,7 @@
             checkBtn.textContent = 'Check Activity (' + uncheckedCount + ' unchecked)';
         }
         // Retry-failed button: only show when there are errored checks
-        const failedCount = results.filter(p => p.activityChecked && p.activityError && !p.gone).length;
+        const failedCount = results.filter(p => p.activityChecked && p.activityError && !p.gone && !p.restricted).length;
         const retryBtn = document.getElementById('asl-retry-failed');
         if (retryBtn) {
             retryBtn.style.display = failedCount > 0 ? 'block' : 'none';
