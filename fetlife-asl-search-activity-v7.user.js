@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.12.0
+// @version        8.13.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -420,6 +420,7 @@
                     <label class="fl" style="margin:4px 0"><input type="checkbox" id="asl-recheck-skip-pics" checked> Skip profiles that already have a saved pic</label>
                     <button class="asl-b" id="asl-recheck-last" style="background:#d80;color:#fff;margin-top:0">Re-check Range (refresh pics)</button>
                     <button class="asl-b" id="asl-fix-photos" style="background:#47a;color:#fff;display:none">Refresh Missing Photos</button>
+                    <button class="asl-b" id="asl-test-photo" style="background:#555;color:#fff">Test Photo Fetch (1 profile)</button>
                     <button class="asl-b" id="asl-active-csv" style="background:#2a6;color:#fff">Export Active to CSV</button>
                     <div id="asl-active-count"></div>
                     <div id="asl-active-res"></div>
@@ -465,6 +466,7 @@
         document.getElementById('asl-active-sort').addEventListener('change', loadAndDisplayResults);
         document.getElementById('asl-active-csv').addEventListener('click', exportActiveCSV);
         document.getElementById('asl-fix-photos').addEventListener('click', refreshMissingPhotos);
+        document.getElementById('asl-test-photo').addEventListener('click', diagnosePhotoFetch);
 
         // Load any existing results
         loadAndDisplayResults();
@@ -801,11 +803,22 @@
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    // Convert image URL to base64 data URL via GM_xmlhttpRequest (bypasses CORS)
-    function fetchImageAsBase64(url) {
+    // Any FetLife-hosted image, whatever CDN subdomain it sits on. Older pics
+    // are on pic*.cdn.fetlife.com, newer ones on flpics*.cdn.fetlife.com, and
+    // og:image tags sometimes point at another host again — so match on the
+    // domain, not on a guessed subdomain prefix.
+    const FL_IMG_HOST = /https?:\/\/[a-z0-9.-]*fetlife\.com\//i;
+
+    // Convert image URL to base64 data URL via GM_xmlhttpRequest (bypasses CORS).
+    // The CDN checks the referrer — a plain GM_xmlhttpRequest sends none and gets
+    // a 403, which is why in-page <img> tags load fine but our copies came back
+    // empty. Send the same Referer the browser would.
+    function fetchImageAsBase64(url, trace) {
+        const note = m => { if (trace) trace.push(m); };
         if (!url || url.startsWith('data:')) return Promise.resolve(url);
-        if (!url.includes('cdn.fetlife.com')) {
-            console.log('[ASL] Skipping non-CDN URL:', url.substring(0, 60));
+        if (!FL_IMG_HOST.test(url)) {
+            console.log('[ASL] Skipping non-FetLife URL:', url.substring(0, 60));
+            note('Skipped: not a FetLife image host');
             return Promise.resolve('');
         }
         return new Promise((resolve) => {
@@ -814,9 +827,15 @@
                     method: 'GET',
                     url: url,
                     responseType: 'arraybuffer',
+                    headers: {
+                        'Referer': 'https://fetlife.com/',
+                        'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+                    },
                     onload: function(resp) {
-                        console.log('[ASL] Image fetch status:', resp.status, 'size:', resp.response ? resp.response.byteLength : 0);
-                        if (resp.status !== 200 || !resp.response || resp.response.byteLength < 100) {
+                        const size = resp.response ? resp.response.byteLength : 0;
+                        console.log('[ASL] Image fetch status:', resp.status, 'size:', size);
+                        note('Download: HTTP ' + resp.status + ', ' + size + ' bytes');
+                        if (resp.status !== 200 || !resp.response || size < 100) {
                             resolve('');
                             return;
                         }
@@ -826,24 +845,37 @@
                             for (let i = 0; i < bytes.length; i += 8192) {
                                 chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 8192, bytes.length))));
                             }
-                            const b64 = 'data:image/jpeg;base64,' + btoa(chunks.join(''));
+                            const b64 = 'data:' + sniffImageType(bytes) + ';base64,' + btoa(chunks.join(''));
                             console.log('[ASL] Base64 converted, length:', b64.length);
+                            note('Converted to a saved image (' + Math.round(b64.length / 1024) + ' KB)');
                             resolve(b64);
                         } catch(e) {
                             console.error('[ASL] Base64 conversion error:', e);
+                            note('Conversion failed: ' + e.message);
                             resolve('');
                         }
                     },
                     onerror: function(e) {
                         console.error('[ASL] GM_xmlhttpRequest image error:', e);
+                        note('Download failed (network/blocked)');
                         resolve('');
                     }
                 });
             } catch(e) {
                 console.error('[ASL] GM_xmlhttpRequest call failed:', e);
+                note('Download call failed: ' + e.message);
                 resolve('');
             }
         });
+    }
+
+    // Label the data: URI correctly — FetLife serves webp and png as well as
+    // jpeg, and a wrong label makes the browser refuse to render it.
+    function sniffImageType(bytes) {
+        if (bytes[0] === 0x89 && bytes[1] === 0x50) return 'image/png';
+        if (bytes[0] === 0x47 && bytes[1] === 0x49) return 'image/gif';
+        if (bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42) return 'image/webp';
+        return 'image/jpeg';
     }
 
     // GM_xmlhttpRequest wrapper — bypasses FetLife's service worker
@@ -963,26 +995,72 @@
     // Pull the avatar straight from the profile page HTML. The activity feed
     // only carries an avatar when the person authored a recent story, so many
     // profiles come back empty there — the profile page always shows their pic.
-    async function fetchAvatarFromProfile(profileUrl) {
+    // Unescape a URL as it appears inside HTML or an embedded JSON blob.
+    function cleanImgUrl(u) {
+        return u.replace(/\\u0026/gi, '&').replace(/\\\//g, '/')
+                .replace(/&amp;/g, '&').replace(/&#(?:38|x26);/gi, '&');
+    }
+
+    // Find the profile owner's picture in the profile page HTML. Tried in order
+    // of how reliably each one is actually the avatar rather than some other
+    // image on the page.
+    function avatarUrlFromProfileHtml(html, trace) {
+        const note = m => { if (trace) trace.push(m); };
+        // 1. The og:image meta tag — FetLife puts the profile pic there for link
+        //    previews, so it is the owner's avatar by definition.
+        const og = html.match(/<meta[^>]+(?:property|name)=["']og:image["'][^>]*content=["']([^"']+)["']/i)
+                || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]*(?:property|name)=["']og:image["']/i);
+        if (og && FL_IMG_HOST.test(cleanImgUrl(og[1]))) {
+            note('Found the picture in the page\'s preview tag');
+            return cleanImgUrl(og[1]);
+        }
+        // 2. A value under an avatar-ish key in an embedded JSON blob.
+        const keyed = html.match(/"[a-z_]*avatar[a-z_]*"\s*:\s*"(https?:[^"]+)"/i);
+        if (keyed && FL_IMG_HOST.test(cleanImgUrl(keyed[1]))) {
+            note('Found the picture in the page data');
+            return cleanImgUrl(keyed[1]);
+        }
+        // 3. Any FetLife-hosted image, whatever subdomain it is served from.
+        //    The avatar renders at the top of the profile, so it comes first.
+        const urls = html.match(/https?:(?:\\\/\\\/|\/\/)[a-z0-9.-]*fetlife\.com\/[^"'\s\\)<>]+\.(?:jpe?g|png|webp|gif)[^"'\s\\)<>]*/gi);
+        if (urls && urls.length) {
+            const pick = urls.find(u => /c160|_c\b|avatar/i.test(u)) || urls[0];
+            note('Found an image on the profile page');
+            return cleanImgUrl(pick);
+        }
+        // 4. Last resort: anything served off a FetLife CDN host, even without a
+        //    file extension (some picture URLs are extensionless).
+        const cdn = html.match(/https?:(?:\\\/\\\/|\/\/)[a-z0-9.-]*cdn\.fetlife\.com\/[^"'\s\\)<>]+/i);
+        if (cdn) {
+            note('Found a CDN image on the profile page');
+            return cleanImgUrl(cdn[0]);
+        }
+        note('No image of any kind in the profile page HTML');
+        return null;
+    }
+
+    async function fetchAvatarFromProfile(profileUrl, trace) {
+        const note = m => { if (trace) trace.push(m); };
         try {
             const resp = await gmFetch(profileUrl, { 'Accept': 'text/html' });
-            if (!resp.ok || !resp.responseText) return null;
-            const html = resp.responseText;
-            const urls = html.match(/https:\\?\/\\?\/pic[a-z0-9-]*\.cdn\.fetlife\.com[^"'\\ )<>]+/gi);
-            if (!urls || !urls.length) {
+            note('Profile page: HTTP ' + resp.status + ', ' +
+                 ((resp.responseText || '').length) + ' characters');
+            if (!resp.ok || !resp.responseText) {
+                console.log('[ASL] Profile page fetch failed:', resp.status, profileUrl);
+                return null;
+            }
+            const url = avatarUrlFromProfileHtml(resp.responseText, trace);
+            if (!url) {
                 console.log('[ASL] No CDN image in profile page for', profileUrl);
                 return null;
             }
-            // The avatar renders at the top of the profile, so it appears first.
-            // Prefer a mid-size variant when one of the same image is available.
-            const clean = u => u.replace(/\\\//g, '/').replace(/&amp;/g, '&');
-            const pick = urls.find(u => /-c160\.|\/c160\./.test(u)) || urls[0];
-            const url = clean(pick);
             console.log('[ASL] Avatar from profile page:', url.substring(0, 70));
-            const b64 = await fetchImageAsBase64(url);
+            note('Picture URL: ' + url.substring(0, 80));
+            const b64 = await fetchImageAsBase64(url, trace);
             return b64 || url;
         } catch(e) {
             console.error('[ASL] fetchAvatarFromProfile error:', e);
+            note('Profile page fetch threw: ' + e.message);
             return null;
         }
     }
@@ -1196,6 +1274,79 @@
         setStatus('Refreshing photos for ' + missing.length + ' active profiles...');
         await loadAndDisplayResults();
         setTimeout(() => startActivityCheck(true, missing), 500);
+    }
+
+    // Runs the whole photo pipeline against ONE profile and prints every step in
+    // plain English, so a failure can be pinned down from the panel without
+    // reading the console.
+    async function diagnosePhotoFetch() {
+        const activeAll = await getActiveSet(false);
+        const missing = activeAll.filter(p => !p.avatar && !p.gone && !p.restricted);
+        const suggested = missing.length ? missing[0].nickname : (activeAll[0] || {}).nickname || '';
+        const nickname = (prompt('Test the photo fetch on which profile?', suggested) || '').trim();
+        if (!nickname) return;
+
+        const box = document.getElementById('asl-active-res');
+        const trace = [];
+        const render = (extra) => {
+            const lines = trace.map(t => '<div style="padding:2px 0">• ' + esc(t) + '</div>').join('');
+            box.innerHTML = '<div style="background:#111;color:#ddd;padding:10px;' +
+                'border-radius:6px;font:12px/1.5 monospace;word-break:break-all">' +
+                '<div style="font-weight:bold;margin-bottom:6px">Photo test: ' + esc(nickname) + '</div>' +
+                lines + (extra || '') + '</div>';
+        };
+
+        trace.push('Starting…');
+        render();
+
+        const profileUrl = 'https://fetlife.com/' + nickname;
+        let avatar = null;
+        try {
+            const resp = await fetchActivityRaw(profileUrl);
+            trace.push('Activity feed: HTTP ' + resp.status +
+                       (resp.finalUrl && resp.finalUrl !== profileUrl + '/activity'
+                        ? ' (redirected to ' + resp.finalUrl + ')' : ''));
+            if (isLockedOut(resp)) {
+                trace.push('FetLife has locked you out — wait, then try again.');
+                render();
+                return;
+            }
+            render();
+            if (resp.ok) {
+                let data = null;
+                try { data = JSON.parse(resp.responseText); }
+                catch(e) { trace.push('Feed was not JSON (' + (resp.responseText || '').length + ' characters)'); }
+                if (data) {
+                    const canonical = nicknameFromUrl(resp.finalUrl) || nickname;
+                    const url = findAvatarForNickname(data, canonical, 0);
+                    if (url) {
+                        trace.push('Feed has their picture: ' + url.replace(/\\\//g, '/').substring(0, 80));
+                        render();
+                        avatar = await fetchImageAsBase64(url.replace(/\\\//g, '/'), trace) || null;
+                    } else {
+                        trace.push('Feed has no picture for them — falling back to the profile page');
+                    }
+                }
+            }
+            render();
+            if (!avatar) {
+                avatar = await fetchAvatarFromProfile(profileUrl, trace);
+            }
+        } catch(e) {
+            trace.push('Error: ' + e.message);
+        }
+
+        if (avatar) {
+            trace.push(avatar.startsWith('data:')
+                ? 'RESULT: got a saved picture. It should show below.'
+                : 'RESULT: got a picture link only (download was refused). It will work now but expires in a day or two.');
+            const img = '<div style="margin-top:8px"><img src="' + avatar.replace(/"/g, '&quot;') +
+                        '" style="max-width:120px;border-radius:6px" alt=""></div>';
+            render(img);
+        } else {
+            trace.push('RESULT: no picture found. The steps above show where it stopped.');
+            render();
+        }
     }
 
     async function recheckByAge() {
