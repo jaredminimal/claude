@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.13.0
+// @version        8.14.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -1001,41 +1001,62 @@
                 .replace(/&amp;/g, '&').replace(/&#(?:38|x26);/gi, '&');
     }
 
-    // Find the profile owner's picture in the profile page HTML. Tried in order
-    // of how reliably each one is actually the avatar rather than some other
-    // image on the page.
+    // Member pictures are served from the CDN hosts. Anything under
+    // fetlife.com/assets/ is site furniture — the header logo, the default
+    // "no picture" silhouette, the og:image share card. Taking those gives
+    // every profile the same meaningless thumbnail, so they are never avatars.
+    const FL_CDN_HOST = /^https?:\/\/[a-z0-9.-]*cdn\.fetlife\.com\//i;
+    const FL_SITE_ASSET = /\/assets\/|\/packs\/|og-image|sprite|favicon|logo|default[-_]?(avatar|pic)|missing/i;
+
+    function isMemberPicture(url) {
+        return FL_CDN_HOST.test(url) && !FL_SITE_ASSET.test(url);
+    }
+
+    // Collect every plausible member picture in a page or feed, best first.
+    // Nothing here trusts a single tag — FetLife's og:image is their own logo,
+    // not the person's photo, so candidates are scored rather than ranked by
+    // where they were found.
+    function collectAvatarCandidates(html) {
+        if (!html || typeof html !== 'string') return [];
+        const raw = html.match(/https?:(?:\\\/\\\/|\/\/)[a-z0-9.-]*fetlife\.com\/[^"'\s\\)<>]+/gi) || [];
+        const seen = new Set();
+        const out = [];
+        for (const r of raw) {
+            const u = cleanImgUrl(r).replace(/[,;]+$/, '');
+            if (seen.has(u) || !isMemberPicture(u)) continue;
+            seen.add(u);
+            out.push(u);
+        }
+        // A FetLife picture URL carries its rendered size, e.g. ..._110.jpg.
+        // The avatar is a small square; the big ones are gallery photos.
+        const size = u => {
+            const m = u.match(/[_-](\d{2,4})\.(?:jpe?g|png|webp|gif)/i);
+            return m ? parseInt(m[1]) : 9999;
+        };
+        out.sort((a, b) => {
+            const av = /avatar|profile/i.test(a) ? 0 : 1;
+            const bv = /avatar|profile/i.test(b) ? 0 : 1;
+            if (av !== bv) return av - bv;
+            return size(a) - size(b);
+        });
+        return out;
+    }
+
     function avatarUrlFromProfileHtml(html, trace) {
         const note = m => { if (trace) trace.push(m); };
-        // 1. The og:image meta tag — FetLife puts the profile pic there for link
-        //    previews, so it is the owner's avatar by definition.
-        const og = html.match(/<meta[^>]+(?:property|name)=["']og:image["'][^>]*content=["']([^"']+)["']/i)
-                || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]*(?:property|name)=["']og:image["']/i);
-        if (og && FL_IMG_HOST.test(cleanImgUrl(og[1]))) {
-            note('Found the picture in the page\'s preview tag');
-            return cleanImgUrl(og[1]);
-        }
-        // 2. A value under an avatar-ish key in an embedded JSON blob.
-        const keyed = html.match(/"[a-z_]*avatar[a-z_]*"\s*:\s*"(https?:[^"]+)"/i);
-        if (keyed && FL_IMG_HOST.test(cleanImgUrl(keyed[1]))) {
+        // An explicit avatar-named key in the page's embedded data beats
+        // anything scraped out of the markup.
+        const keyed = html.match(/"[a-z_]*avatar[a-z_]*(?:_url)?"\s*:\s*"(https?:[^"]+)"/i);
+        if (keyed && isMemberPicture(cleanImgUrl(keyed[1]))) {
             note('Found the picture in the page data');
             return cleanImgUrl(keyed[1]);
         }
-        // 3. Any FetLife-hosted image, whatever subdomain it is served from.
-        //    The avatar renders at the top of the profile, so it comes first.
-        const urls = html.match(/https?:(?:\\\/\\\/|\/\/)[a-z0-9.-]*fetlife\.com\/[^"'\s\\)<>]+\.(?:jpe?g|png|webp|gif)[^"'\s\\)<>]*/gi);
-        if (urls && urls.length) {
-            const pick = urls.find(u => /c160|_c\b|avatar/i.test(u)) || urls[0];
-            note('Found an image on the profile page');
-            return cleanImgUrl(pick);
+        const candidates = collectAvatarCandidates(html);
+        if (candidates.length) {
+            note('Found ' + candidates.length + ' member picture(s) on the page');
+            return candidates[0];
         }
-        // 4. Last resort: anything served off a FetLife CDN host, even without a
-        //    file extension (some picture URLs are extensionless).
-        const cdn = html.match(/https?:(?:\\\/\\\/|\/\/)[a-z0-9.-]*cdn\.fetlife\.com\/[^"'\s\\)<>]+/i);
-        if (cdn) {
-            note('Found a CDN image on the profile page');
-            return cleanImgUrl(cdn[0]);
-        }
-        note('No image of any kind in the profile page HTML');
+        note('No member picture in the profile page HTML (only site graphics)');
         return null;
     }
 
@@ -1081,15 +1102,18 @@
                 return { date: null, error: resp.status, canonical };
             }
 
-            let data;
+            let data = null;
+            let latest = null;
             try { data = JSON.parse(resp.responseText); } catch(e) {
+                // FetLife sometimes answers /activity with the rendered page
+                // instead of JSON. Read the dates out of the markup, but keep
+                // going so the avatar lookup below still runs.
                 console.log('[ASL] Activity response not JSON, trying HTML parse for:', profileUrl);
-                return parseActivityFromHtml(resp.responseText);
+                latest = parseActivityFromHtml(resp.responseText).date;
             }
 
             // Find the most recent created_at from any story in any story_group
-            let latest = null;
-            if (data.story_groups) {
+            if (data && data.story_groups) {
                 for (const group of data.story_groups) {
                     for (const story of (group.stories || [])) {
                         if (story.created_at) {
@@ -1106,8 +1130,8 @@
             let avatar;
             if (wantAvatar) {
                 const matchNick = canonical || origNick;
-                const url = findAvatarForNickname(data, matchNick, 0);
-                if (url) {
+                const url = data ? findAvatarForNickname(data, matchNick, 0) : null;
+                if (url && isMemberPicture(url.replace(/\\\//g, '/'))) {
                     const cleanUrl = url.replace(/\\\//g, '/');
                     console.log('[ASL] Matched avatar for', matchNick, ':', cleanUrl.substring(0, 60));
                     const b64 = await fetchImageAsBase64(cleanUrl);
@@ -1276,6 +1300,36 @@
         setTimeout(() => startActivityCheck(true, missing), 500);
     }
 
+    // v8.13.0 trusted the og:image tag, which on FetLife is their own site logo
+    // rather than the member's photo — so some profiles ended up holding an
+    // identical picture. A real avatar is unique to one person, so any image
+    // saved against several profiles is site furniture. Clear those.
+    const PURGE_FLAG = 'asl_purged_shared_avatars_v1';
+    async function purgeSharedAvatars() {
+        try {
+            if (localStorage.getItem(PURGE_FLAG)) return;
+            const all = await dbGetAllResults();
+            const counts = new Map();
+            for (const p of all) {
+                if (!p.avatar) continue;
+                const k = p.avatar.length + '|' + p.avatar.slice(-64);
+                counts.set(k, (counts.get(k) || 0) + 1);
+            }
+            const toClear = all.filter(p => {
+                if (!p.avatar) return false;
+                return counts.get(p.avatar.length + '|' + p.avatar.slice(-64)) >= 3;
+            });
+            if (toClear.length) {
+                for (const p of toClear) p.avatar = '';
+                await dbPutResults(toClear);
+                console.log('[ASL] Cleared', toClear.length, 'duplicate (site graphic) avatars');
+            }
+            localStorage.setItem(PURGE_FLAG, '1');
+        } catch(e) {
+            console.error('[ASL] purgeSharedAvatars failed:', e);
+        }
+    }
+
     // Runs the whole photo pipeline against ONE profile and prints every step in
     // plain English, so a failure can be pinned down from the panel without
     // reading the console.
@@ -1315,21 +1369,27 @@
             if (resp.ok) {
                 let data = null;
                 try { data = JSON.parse(resp.responseText); }
-                catch(e) { trace.push('Feed was not JSON (' + (resp.responseText || '').length + ' characters)'); }
-                if (data) {
-                    const canonical = nicknameFromUrl(resp.finalUrl) || nickname;
-                    const url = findAvatarForNickname(data, canonical, 0);
-                    if (url) {
-                        trace.push('Feed has their picture: ' + url.replace(/\\\//g, '/').substring(0, 80));
-                        render();
-                        avatar = await fetchImageAsBase64(url.replace(/\\\//g, '/'), trace) || null;
-                    } else {
-                        trace.push('Feed has no picture for them — falling back to the profile page');
-                    }
+                catch(e) { trace.push('Feed came back as a web page, not data (' + (resp.responseText || '').length + ' characters)'); }
+                const canonical = nicknameFromUrl(resp.finalUrl) || nickname;
+                const url = data ? findAvatarForNickname(data, canonical, 0) : null;
+                if (url && isMemberPicture(url.replace(/\\\//g, '/'))) {
+                    trace.push('Feed has their picture: ' + url.replace(/\\\//g, '/').substring(0, 80));
+                    render();
+                    avatar = await fetchImageAsBase64(url.replace(/\\\//g, '/'), trace) || null;
+                } else {
+                    trace.push('Feed has no picture for them — falling back to the profile page');
                 }
             }
             render();
             if (!avatar) {
+                // Show what the page actually offered, so a wrong pick is
+                // obvious instead of silent.
+                const pg = await gmFetch(profileUrl, { 'Accept': 'text/html' });
+                trace.push('Profile page: HTTP ' + pg.status + ', ' + ((pg.responseText || '').length) + ' characters');
+                const cands = collectAvatarCandidates(pg.responseText || '');
+                trace.push('Member pictures on that page: ' + cands.length);
+                cands.slice(0, 4).forEach((c, i) => trace.push('  ' + (i + 1) + '. ' + c.substring(0, 90)));
+                render();
                 avatar = await fetchAvatarFromProfile(profileUrl, trace);
             }
         } catch(e) {
@@ -1338,14 +1398,29 @@
 
         if (avatar) {
             trace.push(avatar.startsWith('data:')
-                ? 'RESULT: got a saved picture. It should show below.'
+                ? 'RESULT: got a saved picture.'
                 : 'RESULT: got a picture link only (download was refused). It will work now but expires in a day or two.');
-            const img = '<div style="margin-top:8px"><img src="' + avatar.replace(/"/g, '&quot;') +
-                        '" style="max-width:120px;border-radius:6px" alt=""></div>';
-            render(img);
+            // Save it, so the profile shows the picture in the results list too.
+            const rec = (await dbGetAllResults()).find(r => r.nickname === nickname);
+            if (rec) {
+                rec.avatar = avatar;
+                await dbPutResults([rec]);
+                trace.push('Saved to this profile — it now shows in the results list.');
+                loadAndDisplayResults();
+            } else {
+                trace.push('(This nickname is not in your results, so nothing was saved.)');
+            }
+            // Side by side with their real profile, so the picture can be checked.
+            const extra = '<div style="margin-top:10px;display:flex;gap:10px;align-items:flex-start">' +
+                '<img src="' + avatar.replace(/"/g, '&quot;') + '" style="width:110px;border-radius:6px" alt="">' +
+                '<a href="' + esc(profileUrl) + '" target="_blank" style="color:#6bf">Open ' +
+                esc(nickname) + '\'s profile to compare →</a></div>';
+            render(extra);
         } else {
             trace.push('RESULT: no picture found. The steps above show where it stopped.');
-            render();
+            render('<div style="margin-top:8px"><a href="' + esc(profileUrl) +
+                   '" target="_blank" style="color:#6bf">Open ' + esc(nickname) +
+                   '\'s profile →</a></div>');
         }
     }
 
@@ -1973,6 +2048,7 @@
     if (location.hostname === 'fetlife.com') {
         (async function init() {
             await migrateFromLocalStorage();
+            await purgeSharedAvatars();
             buildUI();
 
             const isSearching = checkForOngoingSearch();
