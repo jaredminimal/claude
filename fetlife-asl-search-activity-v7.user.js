@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        8.16.0
+// @version        8.17.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -1028,10 +1028,59 @@
         return FL_CDN_HOST.test(url) && !FL_SITE_ASSET.test(url);
     }
 
-    // Collect every plausible member picture in a page or feed, best first.
-    // Nothing here trusts a single tag — FetLife's og:image is their own logo,
-    // not the person's photo, so candidates are scored rather than ranked by
-    // where they were found.
+    // One picture is stored once and served at several sizes, all sharing an
+    // attachment id: .../attachments/177312342/a50.jpg, a160.jpg, a400.jpg.
+    // Grouping by that id is what tells two people's photos apart on a page.
+    function attachmentId(url) {
+        const m = url.match(/\/attachments\/(\d+)\//);
+        return m ? m[1] : null;
+    }
+
+    // Every FetLife page carries YOUR avatar in the site header, so it shows up
+    // in every profile page fetched in the background — and it is the first
+    // picture in the markup, which is how it ended up being saved onto other
+    // people's profiles. A picture belongs to one person, so any attachment id
+    // seen on a second person's page is site chrome, and is remembered as such.
+    const CHROME_IDS_KEY = 'asl_chrome_pic_ids';
+    const ID_OWNER_KEY = 'asl_pic_id_owner';
+
+    function readJson(key, dflt) {
+        try { return JSON.parse(localStorage.getItem(key)) || dflt; } catch(e) { return dflt; }
+    }
+    function writeJson(key, val) {
+        try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {}
+    }
+
+    function learnChromeIds(nickname, ids) {
+        const owner = readJson(ID_OWNER_KEY, {});
+        const chrome = new Set(readJson(CHROME_IDS_KEY, []));
+        let changed = false;
+        for (const id of ids) {
+            if (chrome.has(id)) continue;
+            if (!owner[id]) { owner[id] = nickname; changed = true; }
+            else if (owner[id] !== nickname) { chrome.add(id); delete owner[id]; changed = true; }
+        }
+        if (changed) { writeJson(ID_OWNER_KEY, owner); writeJson(CHROME_IDS_KEY, [...chrome]); }
+        return chrome;
+    }
+
+    // Seed the chrome list straight from the page we are running on, so the
+    // very first lookup is already right instead of learning after two fetches.
+    function seedChromeFromHeader() {
+        const scope = document.querySelector('header, nav, [role="banner"]');
+        if (!scope) return;
+        const chrome = new Set(readJson(CHROME_IDS_KEY, []));
+        let changed = false;
+        scope.querySelectorAll('img[src*="cdn.fetlife.com"]').forEach(img => {
+            const id = attachmentId(img.src);
+            if (id && !chrome.has(id)) { chrome.add(id); changed = true; }
+        });
+        if (changed) writeJson(CHROME_IDS_KEY, [...chrome]);
+    }
+
+    // Collect every plausible member picture in a page or feed, in the order
+    // they appear. Nothing here trusts a single tag — FetLife's og:image is
+    // their own logo, not the person's photo.
     function collectAvatarCandidates(html) {
         if (!html || typeof html !== 'string') return [];
         const raw = html.match(/https?:(?:\\\/\\\/|\/\/)[a-z0-9.-]*fetlife\.com\/[^"'\s\\)<>]+/gi) || [];
@@ -1043,40 +1092,62 @@
             seen.add(u);
             out.push(u);
         }
-        // A FetLife picture URL carries its rendered size, e.g. ..._110.jpg.
-        // The avatar is a small square; the big ones are gallery photos.
-        const size = u => {
-            const m = u.match(/[_-](\d{2,4})\.(?:jpe?g|png|webp|gif)/i);
-            return m ? parseInt(m[1]) : 9999;
-        };
-        out.sort((a, b) => {
-            const av = /avatar|profile/i.test(a) ? 0 : 1;
-            const bv = /avatar|profile/i.test(b) ? 0 : 1;
-            if (av !== bv) return av - bv;
-            return size(a) - size(b);
-        });
         return out;
     }
 
-    function avatarUrlFromProfileHtml(html, trace) {
+    // Pick the picture that belongs to the person whose profile this is.
+    function pickOwnerAvatar(html, nickname, trace) {
         const note = m => { if (trace) trace.push(m); };
-        // An explicit avatar-named key in the page's embedded data beats
-        // anything scraped out of the markup.
-        const keyed = html.match(/"[a-z_]*avatar[a-z_]*(?:_url)?"\s*:\s*"(https?:[^"]+)"/i);
-        if (keyed && isMemberPicture(cleanImgUrl(keyed[1]))) {
-            note('Found the picture in the page data');
-            return cleanImgUrl(keyed[1]);
+        const cands = collectAvatarCandidates(html);
+        if (!cands.length) return null;
+
+        const order = [];
+        const byId = new Map();
+        for (const u of cands) {
+            const id = attachmentId(u) || u;
+            if (!byId.has(id)) { byId.set(id, []); order.push(id); }
+            byId.get(id).push(u);
         }
-        const candidates = collectAvatarCandidates(html);
-        if (candidates.length) {
-            note('Found ' + candidates.length + ' member picture(s) on the page');
-            return candidates[0];
+
+        const chrome = learnChromeIds(nickname, order);
+        let usable = order.filter(id => !chrome.has(id));
+
+        // Until the header avatar has been identified, the safe reading is that
+        // the first picture on the page is it — it sits in the header, above
+        // the profile. Showing nothing beats showing the wrong person.
+        if (usable.length === order.length && order.length > 1) {
+            usable = usable.slice(1);
+            note('Skipping the first picture (site header)');
+        } else if (usable.length === order.length) {
+            note('Only one picture on the page and it has not been ruled out as the header — skipping');
+            return null;
         }
+        if (!usable.length) {
+            note('Every picture on the page was your own header avatar');
+            return null;
+        }
+
+        // Within the person's own picture, prefer the size closest to how big
+        // the results list draws it. a50 is a 2 KB thumbnail; a400 is oversized.
+        const sizeOf = u => {
+            const m = u.match(/\/a(\d{2,4})\.(?:jpe?g|png|webp|gif)/i)
+                   || u.match(/[_-](\d{2,4})\.(?:jpe?g|png|webp|gif)/i);
+            return m ? parseInt(m[1]) : 160;
+        };
+        const group = byId.get(usable[0]).slice()
+            .sort((a, b) => Math.abs(sizeOf(a) - 160) - Math.abs(sizeOf(b) - 160));
+        return group[0];
+    }
+
+    function avatarUrlFromProfileHtml(html, nickname, trace) {
+        const note = m => { if (trace) trace.push(m); };
+        const picked = pickOwnerAvatar(html, nickname, trace);
+        if (picked) return picked;
         note('No member picture in the profile page HTML (only site graphics)');
         return null;
     }
 
-    async function fetchAvatarFromProfile(profileUrl, trace) {
+    async function fetchAvatarFromProfile(profileUrl, trace, nickname) {
         const note = m => { if (trace) trace.push(m); };
         try {
             const resp = await gmFetch(profileUrl, { 'Accept': 'text/html' });
@@ -1086,7 +1157,10 @@
                 console.log('[ASL] Profile page fetch failed:', resp.status, profileUrl);
                 return null;
             }
-            const url = avatarUrlFromProfileHtml(resp.responseText, trace);
+            const url = avatarUrlFromProfileHtml(
+                resp.responseText,
+                nickname || profileUrl.replace(/\/+$/, '').split('/').pop(),
+                trace);
             if (!url) {
                 console.log('[ASL] No CDN image in profile page for', profileUrl);
                 return null;
@@ -1155,7 +1229,7 @@
                 } else {
                     // Not in the feed — fall back to the profile page, which
                     // always shows their avatar.
-                    avatar = await fetchAvatarFromProfile(profileUrl);
+                    avatar = await fetchAvatarFromProfile(profileUrl, null, matchNick);
                 }
             }
             return { date: latest, error: null, canonical, avatar };
@@ -1320,7 +1394,7 @@
     // rather than the member's photo — so some profiles ended up holding an
     // identical picture. A real avatar is unique to one person, so any image
     // saved against several profiles is site furniture. Clear those.
-    const PURGE_FLAG = 'asl_purged_shared_avatars_v1';
+    const PURGE_FLAG = 'asl_purged_shared_avatars_v2';
     async function purgeSharedAvatars() {
         try {
             if (localStorage.getItem(PURGE_FLAG)) return;
@@ -1379,10 +1453,10 @@
                 const cands = collectAvatarCandidates(pg.responseText || '');
                 candidateCount = cands.length;
                 note('Member pictures on that page: ' + cands.length);
-                cands.slice(0, 3).forEach((c, i) => note('   ' + (i + 1) + '. ' + c.substring(0, 95)));
-                if (cands.length) {
-                    note('Using: ' + cands[0].substring(0, 95));
-                    avatar = await fetchImageAsBase64(cands[0], trace) || cands[0];
+                const chosen = pickOwnerAvatar(pg.responseText || '', nickname, trace);
+                if (chosen) {
+                    note('Using: ' + chosen.substring(0, 95));
+                    avatar = await fetchImageAsBase64(chosen, trace) || chosen;
                 }
             }
         } catch(e) {
@@ -2099,6 +2173,7 @@
     if (location.hostname === 'fetlife.com') {
         (async function init() {
             await migrateFromLocalStorage();
+            seedChromeFromHeader();
             await purgeSharedAvatars();
             buildUI();
 
