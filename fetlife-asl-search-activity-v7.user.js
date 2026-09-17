@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        9.0.0
+// @version        9.1.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -1886,11 +1886,41 @@
     let photoWorkerRunning = false;
     let activityCheckRunning = false;
 
-    function queuePhoto(nickname, placeholder) {
+    // A profile whose picture could not be found is not retried for a week.
+    // Without this, every redraw re-queues the same hopeless profiles and the
+    // queue never drains.
+    const PHOTO_RETRY_MS = 7 * 86400000;
+
+    function queuePhoto(nickname, placeholder, lastTried) {
         if (!nickname || photoQueued.has(nickname)) return;
+        if (lastTried && Date.now() - new Date(lastTried).getTime() < PHOTO_RETRY_MS) {
+            if (placeholder) placeholder.title = 'No photo found for this profile';
+            return;
+        }
         photoQueued.add(nickname);
         photoQueue.push({ nickname, placeholder });
+        setPlaceholderState(placeholder, 'waiting');
+        updatePhotoStatus();
         startPhotoWorker();
+    }
+
+    // The card itself says where it is up to, so "which ones are loading?" is
+    // answerable by looking at the list rather than inferring it.
+    function setPlaceholderState(el, state) {
+        if (!el) return;
+        if (state === 'waiting') {
+            el.textContent = '\u22ef';
+            el.style.color = '#667';
+            el.title = 'Waiting to load photo';
+        } else if (state === 'loading') {
+            el.textContent = '\u25cf';
+            el.style.color = '#6bf';
+            el.title = 'Loading photo now';
+        } else {
+            el.textContent = '?';
+            el.style.color = '#666';
+            el.title = 'No photo found for this profile';
+        }
     }
 
     function photoDelay() {
@@ -1907,21 +1937,30 @@
             while (photoQueue.length && !lockoutDetected) {
                 // The activity check is the job the user actually asked for.
                 // Never make requests alongside it.
-                if (activityCheckRunning) { await sleep(5000); continue; }
+                if (activityCheckRunning) { updatePhotoStatus(); await sleep(5000); continue; }
                 const job = photoQueue.shift();
                 photoQueued.delete(job.nickname);
                 // Skip anything scrolled or filtered off the list since queuing.
-                if (job.placeholder && !job.placeholder.isConnected) continue;
-                let res;
+                if (job.placeholder && !job.placeholder.isConnected) { updatePhotoStatus(); continue; }
+                setPlaceholderState(job.placeholder, 'loading');
+                updatePhotoStatus();
+                let res = null;
                 try { res = await photoPipeline(job.nickname, null); }
-                catch(e) { console.error('[ASL] photo fill failed for', job.nickname, e); continue; }
-                if (res.lockedOut) { lockoutDetected = true; break; }
-                if (res.avatar && await saveAvatar(job.nickname, res.avatar, res.sourceUrl)) {
+                catch(e) { console.error('[ASL] photo fill failed for', job.nickname, e); }
+                if (res && res.lockedOut) { lockoutDetected = true; break; }
+                let saved = false;
+                if (res && res.avatar) {
+                    saved = await saveAvatar(job.nickname, res.avatar, res.sourceUrl);
+                }
+                if (saved) {
                     if (job.placeholder && job.placeholder.isConnected) {
                         job.placeholder.replaceWith(makeAvatarImg(job.nickname, res.avatar));
                     }
-                    updatePhotoStatus();
+                } else {
+                    setPlaceholderState(job.placeholder, 'none');
+                    await markPhotoTried(job.nickname);
                 }
+                updatePhotoStatus();
                 if (photoQueue.length) await sleep(photoDelay());
             }
         } finally {
@@ -1930,13 +1969,25 @@
         }
     }
 
+    async function markPhotoTried(nickname) {
+        try {
+            const rec = await dbGetResult(nickname);
+            if (!rec) return;
+            rec.photoTried = new Date().toISOString();
+            await dbPutResults([rec]);
+        } catch(e) { console.error('[ASL] markPhotoTried failed:', e); }
+    }
+
     function updatePhotoStatus() {
         const el = document.getElementById('asl-photo-status');
         if (!el) return;
+        const left = photoQueue.length + (photoWorkerRunning ? 1 : 0);
         if (lockoutDetected) {
-            el.textContent = 'Photo loading paused — FetLife locked you out.';
-        } else if (photoQueue.length) {
-            el.textContent = 'Loading photos in the background… ' + photoQueue.length + ' to go.';
+            el.textContent = 'Photo loading stopped — FetLife locked you out.';
+        } else if (activityCheckRunning && left) {
+            el.textContent = 'Photos paused until the activity check finishes — ' + left + ' waiting.';
+        } else if (left) {
+            el.textContent = 'Loading photos… ' + left + ' to go. The blue dot is the one loading now.';
         } else {
             el.textContent = '';
         }
@@ -1952,7 +2003,7 @@
             this.replaceWith(ph);
             // The stored link has expired. Drop it and let the filler redo it.
             markAvatarBroken(nickname);
-            queuePhoto(nickname, ph);
+            queuePhoto(nickname, ph);  // an expired link always deserves a retry
         });
         return img;
     }
@@ -1971,7 +2022,7 @@
             // filler replace it in place once it has one.
             const ph = makePlaceholder();
             avLink.appendChild(ph);
-            queuePhoto(p.nickname, ph);
+            queuePhoto(p.nickname, ph, p.photoTried);
         }
         const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
         let activityLine = '';
