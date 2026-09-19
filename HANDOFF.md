@@ -1,0 +1,294 @@
+# FetLife ASL Search — session handoff
+
+Written 2026-09-19. Everything below is the state at commit `229d5a0`, script
+version **9.2.0**, working tree clean and pushed.
+
+---
+
+## 1. What this is
+
+A Tampermonkey userscript that runs on `https://fetlife.com/*`. It:
+
+1. Crawls FetLife's kinksters search pages for profiles matching age / sex /
+   location / role.
+2. Checks each profile's last activity date.
+3. Shows the ones active within a threshold, with their profile photo, so the
+   user can review them and message people.
+
+The user is **not a coder**. They operate this entirely through the panel UI and
+screenshots. Do not ask them to open a console, run a snippet, or type a
+username to test something — build what you need into the UI instead.
+
+---
+
+## 2. Where the code lives
+
+| | |
+|---|---|
+| Repo | `github.com/jaredminimal/claude` |
+| Working branch | `claude/fix-fetlife-rate-limit-uD4Gn` |
+| Repo default branch | `claude/debug-fetlife-search-TuBbr` (not `main` — unusual, but correct) |
+| Open PR | #3 (draft) |
+| **Active file** | `fetlife-asl-search-activity-v7.user.js` — **v9.2.0, the only file to edit** |
+
+**Do not touch** `fetlife-asl-search-activity.user.js` (v6.3.0) or
+`fetlife-asl-search.user.js` (v5.6.0). They are legacy. The user explicitly
+asked that v6.3.0 stay untouched, which is why v7 exists as a separate file.
+
+### Delivering a build
+
+Tampermonkey's "Check for updates" **does not work** for this script — the
+per-script update setting is off because it was installed by pasting. Every
+attempt to use `@updateURL` failed. The working process is:
+
+1. Bump `@version` on line 3 (Tampermonkey will not reload otherwise).
+2. `node --check` the file.
+3. Commit, push to the working branch.
+4. Send the file with `SendUserFile`.
+5. Tell them: paste over the whole script in the Tampermonkey editor, Ctrl+S,
+   reload FetLife.
+
+---
+
+## 3. Hard-won facts — do not re-derive these
+
+Each of these cost real debugging time or a lockout. Treat them as settled.
+
+**Network**
+
+1. FetLife is a Vue SPA with a service worker that intercepts `fetch()` and
+   returns 404. **All requests must go through `GM_xmlhttpRequest`.**
+2. The kinksters search pages only yield member cards after real page
+   navigation. Phase 1 genuinely navigates the tab page to page and scrapes the
+   rendered DOM. Do not try to replace this with background fetches.
+3. `/{nickname}/activity` normally returns JSON:
+   `story_groups[].stories[].created_at` and
+   `story_groups[].stories[].author.{nickname, avatar_url, avatar_small_url, profile_url}`.
+   **It sometimes returns rendered HTML instead** — both paths must work.
+   `parseActivityFromHtml` reads dates out of `datetime="..."` attributes.
+4. FetLife periodically changes how it negotiates JSON. A **406** means the
+   `Accept` header was rejected. `ACTIVITY_METHODS` probes a list of known
+   request shapes once, remembers the winner, and re-probes only on a 406.
+5. Status codes: **404** = deleted or renamed account (permanent; also watch
+   `finalUrl` for a rename redirect), **401/403** = private activity feed
+   (permanent), **429** = rate limited, **406** = format rejected.
+6. **Lockout**: FetLife redirects to `/locked` and the body contains
+   "Temporarily Locked Out" / "tripped our security system". Durations escalate
+   on repeat. `isLockedOut(resp)` detects it and the run aborts.
+7. **Safe rate is 3–6 seconds per profile.** A lockout was triggered by a 1.5–3s
+   delay combined with three requests per profile. The script now makes **one**
+   request per profile and the delay is a UI setting defaulting to 3–6s.
+
+**Images** — this consumed most of the session
+
+8. CDN image URLs are signed and **expire in roughly 24–48 hours**. They must be
+   converted to base64 `data:` URIs to persist.
+9. **The CDN rejects image requests that arrive with no referrer.** Proven twice:
+   setting `referrerpolicy="no-referrer"` on `<img>` broke every picture, and
+   `GM_xmlhttpRequest` (which sends no `Referer`) got 403 on every download.
+   **Always send `Referer: https://fetlife.com/`** when downloading an image.
+10. `data:` URIs **do** render on FetLife — CSP allows them. Verified with a test
+    square.
+11. Picture URL shape:
+    `https://picav2-c{SIZE}.cdn.fetlife.com/picture/attachments/{ATTACHMENT_ID}/a{SIZE}.jpg?{epoch}-{sig}`
+    Sizes seen: `a50`, `a160`, `a400`. **The same attachment id at different
+    sizes is the same picture.** Grouping by attachment id is how two people's
+    photos are told apart on one page.
+12. **The logged-in user's own avatar sits in the site header of every FetLife
+    page**, so it appears in every profile page fetched in the background — and
+    it is *first* in the markup. This caused the worst bug of the session: the
+    user's own photo saved onto hundreds of other people's profiles.
+13. **`og:image` on a profile page is FetLife's generic site logo**
+    (`fetlife.com/assets/logo/og-image-*.png`), not the profile photo. Never
+    trust it. Anything under `/assets/` or `/packs/` is site furniture.
+14. Avatar host prefixes vary (`pic*`, `flpics*`, `picav2-c*`). Match on the
+    `cdn.fetlife.com` **domain**, never on a guessed subdomain prefix.
+
+**Storage**
+
+15. `localStorage` blew its 5MB quota at ~11,000 results, which silently killed
+    the crawl loop and left the search stuck "active". Everything moved to
+    IndexedDB in v8.0.0 with a one-time migration.
+
+---
+
+## 4. Storage layout
+
+**IndexedDB** — db `asl_search_db`, version 2
+
+- store `results`, keyPath `nickname`
+- store `seen` (nicknames imported from CSV for dedup)
+
+**Record fields**
+
+| field | meaning |
+|---|---|
+| `nickname`, `age`, `gender`, `role`, `location`, `url` | from the crawl |
+| `avatar` | base64 `data:` URI, or a bare CDN URL if the download failed, or `''` |
+| `batch` | integer search number (140 = the 140th search run) |
+| `batchPages` | e.g. `"1-500"` |
+| `foundAt` | epoch ms when crawled (also used to order within a page) |
+| `activityChecked` | bool |
+| `lastActivity` | ISO date of their most recent story |
+| `checkedAt` | ISO date of the last activity check |
+| `activityError` | status code or message from a failed check |
+| `gone` | true on 404 — deleted or renamed, permanent |
+| `restricted` | true on 401/403 — private activity feed, permanent |
+| `photoTried` | ISO date; no picture could be found, don't retry for 7 days |
+| `refreshTried` | ISO date; any refresh attempt, 1-day cooldown |
+
+**localStorage keys**
+
+`asl_search_state`, `asl_search_progress`, `asl_last_check_batch`,
+`asl_chrome_pic_ids` (attachment ids known to be site chrome),
+`asl_pic_id_owner` (attachment id → nickname),
+`asl_purged_shared_avatars_v2` (one-time cleanup flag).
+
+---
+
+## 5. Architecture as it stands (v9.2.0)
+
+Three tabs: **Search / Results / Active**.
+
+**Phase 1 — crawl.** Real page navigation. Scrapes member cards from the
+rendered DOM and base64s each avatar immediately. This path has always been
+correct, because the browser already rendered the right image. Photos captured
+here are permanent.
+
+**Phase 2 — activity check.** Explicit button on Results, with a progress bar
+and a Stop button. One request per profile at the configured 3–6s delay.
+Detects lockout and aborts. Errors no longer destroy existing data (an earlier
+bug nulled `lastActivity` on any error and silently drained the Active list).
+
+**Background refresh worker (v9.0–9.2).** A card drawn on screen queues itself
+if it has no photo, or if its activity date is more than 14 days old. The worker
+handles one at a time at the configured delay, pauses entirely while an activity
+check runs, and stops on lockout. It reads the photo **and** the activity date
+out of the same `/activity` response, then redraws the whole card in place.
+Profiles that were **never** checked are deliberately left to the explicit
+Check Activity button — silently churning 29,000 profiles in the background is
+how you get locked out without knowing why.
+
+**The correctness invariant that keeps wrong faces off profiles.** In
+`saveAvatar()`: a picture belongs to one person. Every attachment id is recorded
+against the nickname it was saved for. If that attachment is ever offered for a
+second person, it is refused and permanently marked as site chrome. This is
+enforced at the point of saving, so no picking heuristic can bypass it. The
+header avatar is exactly this case — the second profile that sees it kills it
+for good. **Keep this invariant. It is the only thing standing between the user
+and the bug that wasted most of a day.**
+
+---
+
+## 6. What is verified working
+
+Confirmed by the user's screenshots on 2026-09-17:
+
+- Photos load and are **the correct people** (TwoStraws, littleone67,
+  missybratgg, sweetsexyoneleft, A-Fine-Girl, GoddisMystic all distinct and
+  matching their profiles).
+- Activity checks succeed at roughly 94% (the rest are genuine 404s and private
+  feeds).
+- The Find box filters both lists by nickname.
+
+Scale at handoff: **29,013 results, ~3,062 active, batches up to 140.**
+
+---
+
+## 7. Outstanding work, in priority order
+
+### 7.1 Per-search view — this is the live request
+
+The user's words: *"get all these profiles and recent searches cleaned up and
+accurate for review... I can see the last search of people that I did clearly."*
+
+Right now every search is mixed into one list, separated only by
+`— SEARCH 140 (PAGES 1-500) —` dividers. There is no way to look at one search
+on its own.
+
+**Build**: a search/batch dropdown in both Results and Active tabs, listing
+batches newest-first with counts, e.g. `Search 140 — Sep 17 (412)`, plus an
+"All searches" option. Records already carry `batch` and `batchPages`. There is
+**no stored batch timestamp** — derive the date from the minimum `foundAt`
+across the batch.
+
+Wire it the same way the Find box is wired: filter the list before
+`renderProfileList`, leave the counts and buttons describing the whole set so a
+filtered view can never make a bulk action hit the wrong profiles.
+
+Consider also making the background refresh worker prioritise the batch
+currently being viewed.
+
+### 7.2 Cleanup
+
+Hide `gone` (404) and `restricted` (private) profiles from the lists by default,
+and offer one explicit "Remove N deleted accounts" action with a confirmation.
+Keep it non-destructive by default — the user has 29,013 records and no backup
+beyond a CSV export.
+
+### 7.3 Unverified
+
+v9.2.0's stale-activity refresh shipped but the user has not confirmed it in
+practice. The photo half of the same code path is confirmed working.
+
+### 7.4 Coverage gap
+
+The background worker only touches cards actually on screen. Most of the 29,013
+records will never be refreshed unless the user scrolls to them. If a
+whole-library refresh is wanted it needs to be an explicit, interruptible job
+with a progress bar — not a background trickle.
+
+---
+
+## 8. Constraints on the session
+
+- **There is no browser / Chrome MCP available.** The user has asked for this
+  many times and it has been checked repeatedly, including with `ToolSearch` for
+  `claude-in-chrome`, `Claude_Browser`, and `computer-use` — none exist in this
+  environment. You cannot drive their Chrome, inspect the live page, or click
+  anything. Say so once, plainly, and move on; do not keep re-litigating it.
+- **You cannot test against FetLife.** It requires an authenticated session.
+  Every verification comes from the user's screenshots.
+- Therefore: `node --check` every change, reason carefully, and **be honest
+  about what is proven versus what is expected to work.** A large amount of
+  trust was burned in this session by shipping speculative fixes described as
+  solutions.
+
+---
+
+## 9. How the user wants to be worked with
+
+Learned the hard way:
+
+- **Decide things.** They said, near the end: *"I have no idea, I'm relying on
+  you to build an intuitive system that works."* Don't hand them architectural
+  choices. Make the call, explain it in a sentence, move on.
+- **Don't make them operate a debugger.** Buttons like "Test Photos" and
+  "Refresh Missing Photos" were correctly criticised as turning them into the
+  operator of a diagnostic tool. Things should just work in the background.
+  Those buttons were removed in v9.0.0 — don't reintroduce that pattern.
+- **Don't claim a fix works when it hasn't been verified.** Say plainly which
+  part is proven and which is expected.
+- **One file, one paste, bump the version.** Anything else and the update
+  silently doesn't apply, which has confused things more than once.
+- They will say when something is wrong, usually with a screenshot. The
+  screenshots have been the single most useful debugging input in the project —
+  two separate root causes (the site logo, and the shared attachment id) were
+  found by reading URLs out of them.
+
+---
+
+## 10. Quick orientation for the next session
+
+```bash
+cd /home/user/claude
+git log --oneline -15
+sed -n '1,15p' fetlife-asl-search-activity-v7.user.js     # metadata block
+grep -n "saveAvatar\|pickOwnerAvatar\|startPhotoWorker\|photoPipeline" \
+  fetlife-asl-search-activity-v7.user.js                   # the photo system
+grep -n "renderProfileList\|loadAndDisplayResults" \
+  fetlife-asl-search-activity-v7.user.js                   # the list rendering
+node --check fetlife-asl-search-activity-v7.user.js
+```
+
+Start with §7.1. That is what the user asked for last.
