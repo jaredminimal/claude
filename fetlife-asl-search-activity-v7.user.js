@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        9.2.0
+// @version        9.3.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -111,6 +111,18 @@
         return new Promise((resolve, reject) => {
             const tx = db.transaction(STORE_NAME, 'readwrite');
             tx.objectStore(STORE_NAME).delete(nickname);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async function dbDeleteMany(nicknames) {
+        if (!nicknames.length) return;
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            const store = tx.objectStore(STORE_NAME);
+            for (const n of nicknames) store.delete(n);
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
@@ -370,6 +382,10 @@
                 <div class="asl-tab" id="asl-t-results">
                     <p style="font-size:12px;color:#999;margin:0 0 8px">Every profile found across your searches. Run an activity check to move active ones into the Active tab.</p>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Search</label>
+                        <select id="asl-batch" style="margin:0;flex:1;min-width:0"><option value="all">All searches</option></select>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Sort by</label>
                         <select id="asl-sort" style="width:auto;margin:0">
                             <option value="newest" selected>Newest first</option>
@@ -383,6 +399,7 @@
                         <label class="fl" style="margin:0;white-space:nowrap">Find</label>
                         <input type="search" id="asl-find" placeholder="type a name…" style="margin:0;flex:1">
                     </div>
+                    <label class="fl" id="asl-hidden-wrap" style="display:none;margin:6px 0 0;text-transform:none;letter-spacing:0;font-size:12px;color:#999;font-weight:400"><input type="checkbox" id="asl-show-hidden"> Show deleted &amp; private (<span id="asl-hidden-n">0</span>)</label>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Check last</label>
                         <input type="number" id="asl-check-limit" min="1" max="99999" value="5000" style="width:80px;margin:0">
@@ -402,12 +419,17 @@
                     <button class="asl-b" id="asl-import">Import CSV for Dedup</button>
                     <input type="file" id="asl-import-file" accept=".csv" style="display:none">
                     <div id="asl-seen-count"></div>
+                    <button class="asl-b" id="asl-remove-gone" style="background:#853;color:#fff;display:none">Remove deleted accounts</button>
                     <button class="asl-b" id="asl-clear">Clear All Results</button>
                     <div id="asl-rcount"></div>
                     <div id="asl-res"></div>
                 </div>
                 <div class="asl-tab" id="asl-t-active">
                     <p style="font-size:12px;color:#999;margin:0 0 8px">Profiles confirmed active within your threshold. Re-check to refresh their activity &amp; photos.</p>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <label class="fl" style="margin:0;white-space:nowrap">Search</label>
+                        <select id="asl-active-batch" style="margin:0;flex:1;min-width:0"><option value="all">All searches</option></select>
+                    </div>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Sort by</label>
                         <select id="asl-active-sort" style="width:auto;margin:0">
@@ -422,6 +444,7 @@
                         <label class="fl" style="margin:0;white-space:nowrap">Find</label>
                         <input type="search" id="asl-active-find" placeholder="type a name…" style="margin:0;flex:1">
                     </div>
+                    <label class="fl" id="asl-active-hidden-wrap" style="display:none;margin:6px 0 0;text-transform:none;letter-spacing:0;font-size:12px;color:#999;font-weight:400"><input type="checkbox" id="asl-active-show-hidden"> Show deleted &amp; private (<span id="asl-active-hidden-n">0</span>)</label>
                     <div class="sec">Re-check by Age</div>
                     <div class="row">
                         <div><label class="fl">Min Age</label><input type="number" id="asl-recheck-amin" min="18" max="200" value="18" style="margin-bottom:4px"></div>
@@ -482,6 +505,11 @@
         document.getElementById('asl-sort').addEventListener('change', loadAndDisplayResults);
         document.getElementById('asl-active-sort').addEventListener('change', loadAndDisplayResults);
         document.getElementById('asl-active-csv').addEventListener('click', exportActiveCSV);
+        document.getElementById('asl-batch').addEventListener('change', loadAndDisplayResults);
+        document.getElementById('asl-active-batch').addEventListener('change', loadAndDisplayResults);
+        document.getElementById('asl-show-hidden').addEventListener('change', loadAndDisplayResults);
+        document.getElementById('asl-active-show-hidden').addEventListener('change', loadAndDisplayResults);
+        document.getElementById('asl-remove-gone').addEventListener('click', removeGoneProfiles);
         let findTimer = null;
         for (const id of ['asl-find', 'asl-active-find']) {
             document.getElementById(id).addEventListener('input', () => {
@@ -552,6 +580,30 @@
         localStorage.removeItem(PROGRESS_KEY);
         setStatus('Results cleared.');
         await loadAndDisplayResults();
+    }
+
+    // A 404 means the account was deleted or renamed. It can never resolve,
+    // so it is the one thing worth offering to throw away. Private profiles
+    // (401/403) are real people behind a closed feed, so they are hidden but
+    // never removed. Nothing goes without being asked for: there is no backup
+    // beyond the CSV export.
+    async function removeGoneProfiles() {
+        const results = await dbGetAllResults();
+        const gone = results.filter(p => p.gone);
+        if (!gone.length) { alert('No deleted accounts to remove.'); return; }
+        const s = gone.length === 1 ? '' : 's';
+        const ok = confirm(
+            'Remove ' + gone.length + ' deleted account' + s + ' from your results?\n\n' +
+            'These answered 404 - the account was deleted or renamed, so an activity ' +
+            'check can never succeed for them.\n\n' +
+            'Private profiles are NOT touched. Everything else is left alone.\n\n' +
+            'This cannot be undone - export to CSV first if you want a copy.'
+        );
+        if (!ok) return;
+        await dbDeleteMany(gone.map(p => p.nickname));
+        await loadAndDisplayResults();
+        const left = await dbGetCount();
+        alert('Removed ' + gone.length + ' deleted account' + s + '. ' + left + ' profiles left.');
     }
 
     // =====================
@@ -1848,6 +1900,68 @@
         return sorted;
     }
 
+    // Deleted (404) and private (401/403) profiles are permanent dead ends.
+    // They stay in the database - nothing is thrown away unasked - but they are
+    // kept out of both lists unless the user asks for them, so a review list
+    // is people who can actually be reviewed.
+    function isDeadEnd(p) {
+        return !!(p.gone || p.restricted);
+    }
+
+    // One entry per search run, newest first. There is no stored batch
+    // timestamp, so the date is the earliest thing that search found.
+    function batchSummaries(list) {
+        const map = new Map();
+        for (const p of list) {
+            const key = p.batch || 0;
+            let b = map.get(key);
+            if (!b) { b = { batch: key, count: 0, first: Infinity, pages: '' }; map.set(key, b); }
+            b.count++;
+            if (p.foundAt && p.foundAt < b.first) b.first = p.foundAt;
+            if (!b.pages && p.batchPages) b.pages = p.batchPages;
+        }
+        return [...map.values()].sort((a, b) => b.batch - a.batch);
+    }
+
+    function batchLabel(b) {
+        if (!b.batch) return 'Earlier results (' + b.count + ')';
+        let when = '';
+        if (b.first !== Infinity) {
+            const d = new Date(b.first);
+            const opts = { month: 'short', day: 'numeric' };
+            if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+            when = ' \u00b7 ' + d.toLocaleDateString('en-US', opts);
+        }
+        return 'Search ' + b.batch + when + ' (' + b.count + ')';
+    }
+
+    // Rebuild a search dropdown only when the searches behind it have actually
+    // changed, so a redraw never yanks the list out from under an open select.
+    // The chosen search survives the redraw; if it no longer has anything in
+    // this list, the view falls back to All rather than showing nothing.
+    function syncBatchOptions(selectId, summaries) {
+        const sel = document.getElementById(selectId);
+        if (!sel) return 'all';
+        const sig = summaries.map(b => b.batch + ':' + b.count).join('|');
+        if (sel.dataset.sig !== sig) {
+            const want = sel.value || 'all';
+            sel.innerHTML = '';
+            const all = document.createElement('option');
+            all.value = 'all';
+            all.textContent = 'All searches';
+            sel.appendChild(all);
+            for (const b of summaries) {
+                const o = document.createElement('option');
+                o.value = String(b.batch);
+                o.textContent = batchLabel(b);
+                sel.appendChild(o);
+            }
+            sel.dataset.sig = sig;
+            sel.value = [...sel.options].some(o => o.value === want) ? want : 'all';
+        }
+        return sel.value || 'all';
+    }
+
     // When a stored avatar URL fails to load it has expired. Clear it (batched)
     // so the "missing photos" count reflects what's actually broken.
     const brokenAvatarQueue = new Set();
@@ -1932,6 +2046,32 @@
         setPlaceholderState(placeholder, 'waiting');
         updatePhotoStatus();
         startPhotoWorker();
+    }
+
+    // The background refresh only ever works on what is drawn on screen, so
+    // narrowing the list to one search is also what points the worker at that
+    // search. Jobs left over from the previous view are re-pointed at the
+    // redrawn card when the same person is still listed, and dropped when they
+    // are not - otherwise the worker spends its requests on profiles nobody
+    // is looking at any more.
+    function prunePhotoQueue(liveCards) {
+        if (!photoQueue.length) return;
+        let dropped = 0;
+        for (let i = photoQueue.length - 1; i >= 0; i--) {
+            const job = photoQueue[i];
+            if (job.card && job.card.isConnected) continue;
+            const fresh = liveCards.get(job.nickname);
+            if (fresh) {
+                job.card = fresh;
+                job.placeholder = fresh.querySelector('a.av > div');
+                setPlaceholderState(job.placeholder, 'waiting');
+            } else {
+                photoQueue.splice(i, 1);
+                photoQueued.delete(job.nickname);
+                dropped++;
+            }
+        }
+        if (dropped) updatePhotoStatus();
     }
 
     // The card itself says where it is up to, so "which ones are loading?" is
@@ -2075,6 +2215,7 @@
     function buildProfileCard(p, activityDays) {
         const d = document.createElement('div');
         d.className = 'asl-r';
+        d.dataset.nick = p.nickname;
         const avLink = document.createElement('a');
         avLink.className = 'av';
         avLink.href = p.url;
@@ -2175,23 +2316,60 @@
         const active = results.filter(p => p.activityChecked && p.lastActivity && new Date(p.lastActivity) >= cutoff);
 
         // Counters
-        // "Find" boxes narrow each list by nickname without touching any of the
-        // counts or buttons, which still describe the whole set.
+        // The Search dropdown and the Find box narrow each list, and dead-end
+        // profiles are kept out of it. None of that touches the buttons below,
+        // which still act on the whole set — a narrowed view must never make a
+        // bulk action hit the wrong profiles.
         const findVal = id => ((document.getElementById(id) || {}).value || '').trim().toLowerCase();
         const byName = (list, q) => q ? list.filter(p => (p.nickname || '').toLowerCase().includes(q)) : list;
+        const byBatch = (list, sel) => sel === 'all' ? list : list.filter(p => String(p.batch || 0) === sel);
         const rq = findVal('asl-find');
         const aq = findVal('asl-active-find');
-        const shownResults = byName(results, rq);
-        const shownActive = byName(active, aq);
+
+        const showDeadR = !!(document.getElementById('asl-show-hidden') || {}).checked;
+        const showDeadA = !!(document.getElementById('asl-active-show-hidden') || {}).checked;
+        const deadResults = results.filter(isDeadEnd).length;
+        const deadActive = active.filter(isDeadEnd).length;
+        const resultsPool = showDeadR ? results : results.filter(p => !isDeadEnd(p));
+        const activePool = showDeadA ? active : active.filter(p => !isDeadEnd(p));
+
+        // Each dropdown counts its own list, so the number beside a search is
+        // what selecting it will actually show.
+        const rBatch = syncBatchOptions('asl-batch', batchSummaries(resultsPool));
+        const aBatch = syncBatchOptions('asl-active-batch', batchSummaries(activePool));
+
+        const shownResults = byName(byBatch(resultsPool, rBatch), rq);
+        const shownActive = byName(byBatch(activePool, aBatch), aq);
+
+        const filterBits = (sel, q, hidden) => {
+            const bits = [];
+            if (sel !== 'all') bits.push(sel === '0' ? 'earlier results' : 'Search ' + sel);
+            if (q) bits.push('matching "' + q + '"');
+            if (hidden) bits.push(hidden + ' deleted/private hidden');
+            return bits;
+        };
+        const rBits = filterBits(rBatch, rq, showDeadR ? 0 : deadResults);
+        const aBits = filterBits(aBatch, aq, showDeadA ? 0 : deadActive);
 
         const rcount = document.getElementById('asl-rcount');
         if (rcount) rcount.textContent = total === 0 ? 'No results yet.'
-            : (rq ? 'Showing ' + shownResults.length + ' of ' + total + ' matching "' + rq + '"'
+            : (rBits.length ? 'Showing ' + shownResults.length + ' of ' + total + ' · ' + rBits.join(' · ')
                   : total + ' total · ' + checkedCount + ' checked · ' + uncheckedCount + ' unchecked');
         const acount = document.getElementById('asl-active-count');
-        if (acount) acount.textContent = aq
-            ? 'Showing ' + shownActive.length + ' of ' + active.length + ' matching "' + aq + '"'
+        if (acount) acount.textContent = aBits.length
+            ? 'Showing ' + shownActive.length + ' of ' + active.length + ' active · ' + aBits.join(' · ')
             : active.length + ' active profiles';
+
+        // The "show deleted & private" checkboxes only appear when there is
+        // something behind them.
+        const setDeadToggle = (wrapId, nId, n) => {
+            const wrap = document.getElementById(wrapId);
+            const nEl = document.getElementById(nId);
+            if (wrap) wrap.style.display = n ? 'block' : 'none';
+            if (nEl) nEl.textContent = String(n);
+        };
+        setDeadToggle('asl-hidden-wrap', 'asl-hidden-n', deadResults);
+        setDeadToggle('asl-active-hidden-wrap', 'asl-active-hidden-n', deadActive);
         const rtab = document.getElementById('asl-rtab-count');
         if (rtab) rtab.textContent = total ? ('(' + total + ')') : '';
         const atab = document.getElementById('asl-atab-count');
@@ -2214,12 +2392,27 @@
         if (csvBtn) csvBtn.style.display = total ? 'block' : 'none';
         const clearBtn = document.getElementById('asl-clear');
         if (clearBtn) clearBtn.style.display = total ? 'block' : 'none';
+        // Always the whole set, whatever the list is narrowed to, and it says
+        // the number out loud so there is nothing to infer.
+        const goneCount = results.filter(p => p.gone).length;
+        const goneBtn = document.getElementById('asl-remove-gone');
+        if (goneBtn) {
+            goneBtn.style.display = goneCount ? 'block' : 'none';
+            goneBtn.textContent = 'Remove ' + goneCount + ' deleted account' + (goneCount === 1 ? '' : 's');
+        }
 
         // Render both lists
         const resultsSort = (document.getElementById('asl-sort') || {}).value || 'newest';
         const activeSort = (document.getElementById('asl-active-sort') || {}).value || 'newest';
-        renderProfileList('asl-res', shownResults, resultsSort, activityDays, true);
-        renderProfileList('asl-active-res', shownActive, activeSort, activityDays, true);
+        // Dividers only earn their place when more than one search is in view.
+        renderProfileList('asl-res', shownResults, resultsSort, activityDays, rBatch === 'all');
+        renderProfileList('asl-active-res', shownActive, activeSort, activityDays, aBatch === 'all');
+
+        const liveCards = new Map();
+        for (const el of document.querySelectorAll('#asl .asl-r[data-nick]')) {
+            if (!liveCards.has(el.dataset.nick)) liveCards.set(el.dataset.nick, el);
+        }
+        prunePhotoQueue(liveCards);
     }
 
     // =====================
