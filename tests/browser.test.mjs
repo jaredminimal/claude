@@ -193,6 +193,13 @@ ok('every photo is the person it belongs to',
    pics.every(p => p.tag === p.nick), pics.filter(p=>p.tag!==p.nick).map(p=>p.nick+'<-'+p.tag).join(',') || 'all matched');
 ok('the profile whose card had no image got no photo, not the page HTML',
    !pics.some(p => p.nick === 'member15'), pics.filter(p=>p.nick==='member15').map(p=>p.tag).join(''));
+const noPicReason = await page.evaluate(async () => {
+  const db = await new Promise(r => { const q = indexedDB.open('asl_search_db'); q.onsuccess = () => r(q.result); });
+  const rec = await new Promise(r => { const t = db.transaction('results','readonly').objectStore('results').get('member15'); t.onsuccess = () => r(t.result); });
+  db.close(); return rec && rec.photoReason;
+});
+ok('and the card can say WHY, instead of a silent question mark',
+   !!noPicReason, noPicReason || '(no reason recorded)');
 ok('nobody got the logged-in user’s header avatar',
    !pics.some(p => p.tag === 'HEADER-AVATAR'));
 ok('the CDN refused nothing (the referer was always sent)', served.cdn > 0);
@@ -526,6 +533,104 @@ ok('both old searches are in the dropdown, newest first',
 ok('the counts describe the whole library', /600 total/.test(ui.count), ui.count);
 ok('no uncaught errors during the upgrade', errors2.length === 0, errors2.slice(0,2).join(' | '));
 await p2.locator('#asl').screenshot({ path: new URL('panel-migrated.png', import.meta.url).pathname });
+
+// ===================================================================
+// THE BLACKLIST BUG. Three people who appear on each other's profile
+// pages. Ownership of a picture used to be claimed for every id found
+// on a page, so the first profile visited claimed the other two's
+// faces, and when their own pages came up their real avatars were
+// ruled site furniture and refused for good. It got worse the more
+// profiles were scanned.
+//
+// This guard anchors on a handle the BROKEN code already has - a
+// person ending up with no photo - so it fails on the old code rather
+// than passing for the wrong reason.
+// ===================================================================
+head('EACH PERSON KEEPS THEIR OWN FACE (other members appear on every page)');
+const ctx3 = await browser.newContext();
+await ctx3.route('**://*fetlife.com/**', async route => {
+  const u = new URL(route.request().url());
+  const cors = { 'Access-Control-Allow-Origin': '*' };
+  if (u.hostname.endsWith('cdn.fetlife.com')) {
+    const hdrs = await route.request().allHeaders();
+    if (!hdrs['x-asl-referer'] && !hdrs['referer'])
+      return route.fulfill({ status: 403, body: 'no referer', headers: cors });
+    const id = (u.pathname.match(/attachments\/(\d+)\//) || [])[1] || '0';
+    const who = id === '999999' ? 'HEADER-AVATAR'
+              : (M.RING.find(p => String(p.attachment) === id) || {}).nick || 'unknown';
+    return route.fulfill({ status: 200, contentType: 'image/jpeg',
+                           body: M.jpegFor(who), headers: cors });
+  }
+  const act = u.pathname.match(/^\/([^/]+)\/activity(\.json)?$/);
+  if (act && M.ringByNick(act[1]))
+    return route.fulfill({ status: 200, contentType: 'application/json',
+                           body: M.ringActivityJson(M.ringByNick(act[1])), headers: cors });
+  const prof = u.pathname.match(/^\/([^/]+)\/?$/);
+  if (prof && M.ringByNick(prof[1]))
+    return route.fulfill({ status: 200, contentType: 'text/html',
+                           body: M.ringProfilePage(M.ringByNick(prof[1])), headers: cors });
+  return route.fulfill({ status: 200, contentType: 'text/html',
+    body: '<html><head><title>x</title></head><body><header><img src="' + M.HEADER_PIC +
+          '"></header><main>ok</main></body></html>' });
+});
+await ctx3.addInitScript({ content: WRAPPED });
+const p3 = await ctx3.newPage();
+const errors3 = [];
+p3.on('pageerror', e => errors3.push(String(e)));
+await p3.goto('https://fetlife.com/p/united-states/arizona/phoenix/kinksters');
+await p3.waitForSelector('#asl-btn', { timeout: 15000 });
+
+await p3.evaluate(async (ring) => {
+  const db = await new Promise((res, rej) => {
+    const q = indexedDB.open('asl_search_db');
+    q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+  });
+  const tx = db.transaction('results', 'readwrite');
+  const st = tx.objectStore('results');
+  ring.forEach((p, i) => st.put({
+    nickname: p.nick, age: p.age, gender: 'Female', role: p.role, location: p.city,
+    url: 'https://fetlife.com/' + p.nick, batch: 1, batchPages: '1-1',
+    foundAt: 1758000000000 + i, activityChecked: false,
+  }));
+  await new Promise(r => { tx.oncomplete = r; });
+  db.close();
+}, M.RING);
+
+await p3.evaluate(() => {
+  document.getElementById('asl').classList.add('open');
+  document.getElementById('asl-act-min').value = '1';
+  document.getElementById('asl-act-max').value = '1';
+});
+await showTab(p3, 'results');
+await p3.evaluate(() => document.getElementById('asl-sort').dispatchEvent(new Event('change')));
+
+const faces = await waitUntil(p3, async () => {
+  const db = await new Promise(r => { const q = indexedDB.open('asl_search_db'); q.onsuccess = () => r(q.result); });
+  const g = s => new Promise(r => { const t = db.transaction(s,'readonly').objectStore(s).getAll(); t.onsuccess = () => r(t.result); });
+  const rows = await g('results'); const pics = await g('avatars');
+  db.close();
+  const tried = rows.filter(x => x.photoTried || pics.some(a => a.nickname === x.nickname)).length;
+  const owned = {};
+  for (const a of pics) {
+    const m = atob(a.avatar.split(',')[1] || '').match(/ASL-TEST:([\w-]+)/);
+    owned[a.nickname] = m ? m[1] : '(undecodable)';
+  }
+  return { done: tried >= 3, owned, reasons: rows.map(x => x.nickname + ':' + (x.photoReason || '')) };
+}, 180000, 'all three photos to resolve');
+
+ok('all three people got a photo', Object.keys(faces.owned).length === 3,
+   JSON.stringify(faces.owned) + ' ' + faces.reasons.join(' | '));
+ok('and each got their OWN face, not a neighbour\u2019s',
+   M.RING.every(p => faces.owned[p.nick] === p.nick), JSON.stringify(faces.owned));
+ok('nobody was given the header avatar',
+   !Object.values(faces.owned).includes('HEADER-AVATAR'));
+const blacklist = await p3.evaluate(() => JSON.parse(localStorage.getItem('asl_chrome_pic_ids') || '[]'));
+ok('only the header avatar is blacklisted, not real people',
+   blacklist.every(id => id === '999999'), JSON.stringify(blacklist));
+const ownerMap = await p3.evaluate(() => Object.keys(JSON.parse(localStorage.getItem('asl_pic_id_owner') || '{}')).length);
+ok('the ownership map holds one id per saved photo, not every picture on every page',
+   ownerMap <= 3, ownerMap + ' entries for 3 profiles');
+ok('no uncaught errors', errors3.length === 0, errors3.slice(0,2).join(' | '));
 
 await browser.close();
 console.log('\n' + (fails ? fails + ' of ' + checks + ' FAILED' : 'All ' + checks + ' browser checks passed.'));

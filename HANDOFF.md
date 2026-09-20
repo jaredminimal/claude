@@ -1,7 +1,7 @@
 # FetLife ASL Search — session handoff
 
 Written 2026-09-19, updated 2026-09-20. Everything below is the state at
-script version **9.6.0**, working tree clean and pushed.
+script version **9.8.0**, working tree clean and pushed.
 
 ---
 
@@ -310,6 +310,49 @@ Three defects that reading the code had not surfaced in any prior session:
 
 3. **The panel closed on every crawl navigation**, so a 500-page crawl ran
    unwatched. It now remembers it was open.
+
+### 7.7 The two bugs that were actually costing the photos (2026-09-20)
+
+Found from the user's screenshots plus a browser fixture of three people who
+appear on each other's profile pages. Both reproduced, both proven to fail on
+the old code by stashing the fix.
+
+1. **THE BACKGROUND PHOTO WORKER HAD NEVER WORKED.** `queuePhoto` is called
+   from inside `buildProfileCard`, which runs BEFORE the caller appends the
+   card to the page. `startPhotoWorker` runs synchronously up to its first
+   await, so it inspected a placeholder that was not in the document yet,
+   judged the card scrolled away, and threw the job out - every card, one
+   after another. That is why the queue always read as empty while the cards
+   sat on "waiting". Stashing the fix: **zero photos, zero requests.**
+   Fixed by kicking the worker on a `setTimeout(…, 0)` (`kickPhotoWorker`), by
+   which time the render is finished and every card is in the document.
+   Photos were only ever arriving from Phase 1 and from the activity check.
+
+2. **GENUINE AVATARS WERE BEING BLACKLISTED, PERMANENTLY, AND IT GOT WORSE THE
+   MORE YOU SCANNED.** `pickOwnerAvatar` called `learnChromeIds(nickname,
+   order)` with EVERY picture id on the profile page. A profile page carries
+   the person's whole gallery (a card reading "126 pics" means 126 more ids)
+   and other members' faces in feeds, friend strips and sidebars. Every
+   unclaimed id was stamped as owned by whoever's page it appeared on, so when
+   the real owner came up later the id belonged to someone else - and their
+   own avatar was ruled site furniture and refused from then on. It also grew
+   `asl_pic_id_owner` by every picture on every page into a 5MB-capped
+   localStorage, and `writeJson` swallows the quota error.
+   Stashing the fix, with three profiles: **one photo out of three, and all
+   three people's avatars in the blacklist.**
+   `knownChromeIds()` now only READS. Ownership is claimed in `saveAvatar`,
+   for the one picture actually saved against a person - which is where §5
+   always said the invariant was enforced, and it still is.
+   `repairChromeLists` clears the poisoned lists once (`asl_chrome_repair_v3`)
+   and `clearPhotoGiveUps` drops the week-long "no photo" verdicts reached
+   while genuine avatars were being refused.
+
+**Visibility, added with them**, because "is this even working?" was not
+answerable from the panel: a missing photo now carries the pipeline's own last
+line as `photoReason` and the card prints it; a health line under the counts
+reports photos / checked / dated / failures by code for whatever is on screen;
+and the activity check's completion message names the failures instead of
+reporting only actives and inactives.
 
 ### 7.6 The strategic question, answered 2026-09-20
 

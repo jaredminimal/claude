@@ -76,10 +76,47 @@ export function activityHtml(p) {
     <img src="${picUrl(p, 400)}" alt="${p.nick}"></body></html>`;
 }
 export function profilePage(p) {
+  // A 'nopic' profile has no picture ANYWHERE, page included. Otherwise the
+  // app is right to find one there, and the test would be asserting a bug.
+  const own = p.behaviour === 'nopic' ? '' : `<img src="${picUrl(p, 400)}" alt="${p.nick}">`;
   return `<!doctype html><html><head>
     <meta property="og:image" content="https://fetlife.com/assets/logo/og-image-1.png">
     </head><body>
     <header><img src="https://picav2-c50.cdn.fetlife.com/picture/attachments/999999/a50.jpg?1758000000-me"></header>
-    <img src="${picUrl(p, 400)}" alt="${p.nick}"></body></html>`;
+    ${own}</body></html>`;
 }
 export const byNick = n => PROFILES.find(p => p.nick === n);
+
+// ---------------------------------------------------------------------------
+// A ring of three people who all appear on each other's profile pages, the way
+// FetLife really draws them: friend strips, feeds, sidebars. Their activity
+// feeds carry a date but no avatar, so the photo has to come off the profile
+// page - which is the path where ownership used to be claimed for every
+// picture on the page, poisoning everyone else's.
+// ---------------------------------------------------------------------------
+export const HEADER_PIC =
+  'https://picav2-c50.cdn.fetlife.com/picture/attachments/999999/a50.jpg?1758000000-me';
+
+export const RING = ['alpha', 'beta', 'gamma'].map((nick, i) => ({
+  nick, age: 30 + i, gender: 'F', role: 'Switch', city: 'Phoenix',
+  attachment: 700000 + i,
+}));
+
+export function ringActivityJson(p) {
+  return JSON.stringify({ story_groups: [ { stories: [
+    { created_at: daysAgo(2),
+      author: { nickname: p.nick, avatar_url: null,
+                profile_url: 'https://fetlife.com/' + p.nick } } ] } ] });
+}
+
+export function ringProfilePage(p) {
+  const others = RING.filter(o => o.nick !== p.nick);
+  return `<!doctype html><html><body>
+    <header><img src="${HEADER_PIC}" alt="you"></header>
+    <main><img src="${picUrl(p, 400)}" alt="${p.nick}"></main>
+    <aside class="friends">
+      ${others.map(o => `<a href="/${o.nick}"><img src="${picUrl(o, 160)}"></a>`).join('\n')}
+    </aside></body></html>`;
+}
+
+export const ringByNick = n => RING.find(p => p.nick === n);

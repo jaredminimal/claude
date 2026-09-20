@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        9.6.0
+// @version        9.8.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -539,6 +539,7 @@
                     <button class="asl-b" id="asl-remove-gone" style="background:#853;color:#fff;display:none">Remove deleted accounts</button>
                     <button class="asl-b" id="asl-clear">Clear All Results</button>
                     <div id="asl-rcount"></div>
+                    <div id="asl-health" style="font-size:11px;color:#89a;margin:2px 0 6px;line-height:1.5"></div>
                     <div id="asl-res"></div>
                 </div>
                 <div class="asl-tab" id="asl-t-active">
@@ -1346,17 +1347,46 @@
         try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {}
     }
 
-    function learnChromeIds(nickname, ids) {
-        const owner = readJson(ID_OWNER_KEY, {});
-        const chrome = new Set(readJson(CHROME_IDS_KEY, []));
-        let changed = false;
-        for (const id of ids) {
-            if (chrome.has(id)) continue;
-            if (!owner[id]) { owner[id] = nickname; changed = true; }
-            else if (owner[id] !== nickname) { chrome.add(id); delete owner[id]; changed = true; }
-        }
-        if (changed) { writeJson(ID_OWNER_KEY, owner); writeJson(CHROME_IDS_KEY, [...chrome]); }
-        return chrome;
+    // READ ONLY. This used to claim ownership of every picture id found on a
+    // profile page, and that quietly destroyed the photo library.
+    //
+    // A FetLife profile page carries far more than the person's avatar: their
+    // whole gallery (a card reading "126 pics" means 126 more ids), and other
+    // members' faces in feeds, friend lists and sidebars. Claiming all of them
+    // for whoever's page they happened to appear on meant that when the person
+    // who ACTUALLY owns a picture came up later, the id already belonged to
+    // somebody else - so their genuine avatar was ruled site furniture and
+    // refused from then on, permanently.
+    //
+    // It got worse the more profiles were scanned, which is exactly how it
+    // felt. It also grew a localStorage object by every picture on every page,
+    // and writeJson swallows the quota error, so past some size it silently
+    // stopped recording anything at all.
+    //
+    // Ownership is claimed in saveAvatar, for the ONE picture actually saved
+    // against a person. That is where the invariant belongs and where the
+    // notes always said it was enforced.
+    function knownChromeIds() {
+        return new Set(readJson(CHROME_IDS_KEY, []));
+    }
+
+    // Everything learned under the old rule is untrustworthy: the blacklist
+    // holds real people's avatars and the owner map holds gallery pictures
+    // claimed by whoever's page they appeared on. Both are rebuilt correctly
+    // from here - seedChromeFromHeader re-reads the real header avatar on every
+    // page load, and saveAvatar re-claims each picture as it saves it - so the
+    // repair is simply to forget the poisoned version.
+    const CHROME_REPAIR_FLAG = 'asl_chrome_repair_v3';
+    function repairChromeLists() {
+        if (localStorage.getItem(CHROME_REPAIR_FLAG)) return false;
+        const hadChrome = readJson(CHROME_IDS_KEY, []).length;
+        const hadOwners = Object.keys(readJson(ID_OWNER_KEY, {})).length;
+        localStorage.removeItem(CHROME_IDS_KEY);
+        localStorage.removeItem(ID_OWNER_KEY);
+        localStorage.setItem(CHROME_REPAIR_FLAG, '1');
+        console.log('[ASL] Cleared', hadChrome, 'blacklisted picture ids and',
+                    hadOwners, 'ownership claims made under the old rule');
+        return hadChrome > 0 || hadOwners > 0;
     }
 
     // Seed the chrome list straight from the page we are running on, so the
@@ -1404,7 +1434,7 @@
             byId.get(id).push(u);
         }
 
-        const chrome = learnChromeIds(nickname, order);
+        const chrome = knownChromeIds();
         let usable = order.filter(id => !chrome.has(id));
 
         // Until the header avatar has been identified, the safe reading is that
@@ -1862,6 +1892,12 @@
         let active = 0;
         let inactive = 0;
         let errors = 0;
+        // A run that reports only actives and inactives hides the failures,
+        // and a failure is the thing worth knowing about.
+        const errorCounts = {};
+        const errorSummary = () => Object.keys(errorCounts)
+            .sort((a, b) => errorCounts[b] - errorCounts[a])
+            .map(k => errorCounts[k] + ' x ' + k).join(', ');
 
         // The photo filler steps aside while this runs, so the two never make
         // requests at the same time.
@@ -1930,6 +1966,8 @@
                 if (result.error === 404) p.gone = true;
                 if (result.error === 401 || result.error === 403) p.restricted = true;
                 errors++;
+                const key = String(result.error);
+                errorCounts[key] = (errorCounts[key] || 0) + 1;
                 if (result.error === 429 || result.error === 503) {
                     console.log('[ASL] Rate limited, waiting 30s...');
                     progressEl.innerHTML += '<br><span style="color:#cc6">Rate limited — waiting 30 seconds...</span>';
@@ -1976,7 +2014,9 @@
         const remaining = unchecked.length - checked;
         const msg = activityCheckAbort
             ? `Activity check paused — ${checked}/${total} checked. ${active} active, ${inactive} inactive.${remaining > 0 ? ' ' + remaining + ' remaining in batch.' : ''}`
-            : `Activity check complete! ${active} active, ${inactive} inactive out of ${total} checked.`;
+            : `Activity check complete! ${active} active, ${inactive} inactive` +
+              (errors ? `, ${errors} failed (${errorSummary()})` : '') +
+              ` out of ${total} checked.`;
         progressEl.innerHTML = `<strong>${msg}</strong>`;
         setStatus(msg);
         // Show the freshly-active profiles in the Active tab
@@ -2332,6 +2372,24 @@
     // redraw and the worker never gets past it.
     const REFRESH_COOLDOWN_MS = 86400000;
 
+    // The worker is kicked on the next tick, never synchronously.
+    //
+    // queuePhoto is called from inside buildProfileCard, which runs BEFORE the
+    // caller appends the card to the page. startPhotoWorker runs synchronously
+    // up to its first await, so a worker started here inspected a placeholder
+    // that was not in the document yet, judged the card scrolled away, and
+    // threw the job out. Every card drawn without a photo was discarded that
+    // way, one after another, which is why photos never filled themselves in
+    // and why the queue always read as empty while the cards sat on "waiting".
+    //
+    // A timeout of 0 is enough: the whole render is synchronous, so by the time
+    // it fires every card is in the document.
+    let photoKick = null;
+    function kickPhotoWorker() {
+        if (photoKick) return;
+        photoKick = setTimeout(() => { photoKick = null; startPhotoWorker(); }, 0);
+    }
+
     function queuePhoto(nickname, placeholder, lastTried, card, activityDays) {
         if (!nickname || photoQueued.has(nickname)) return;
         if (lastTried && Date.now() - new Date(lastTried).getTime() < PHOTO_RETRY_MS) {
@@ -2342,7 +2400,7 @@
         photoQueue.push({ nickname, placeholder, card, activityDays });
         setPlaceholderState(placeholder, 'waiting');
         updatePhotoStatus();
-        startPhotoWorker();
+        kickPhotoWorker();
     }
 
     // The background refresh only ever works on what is drawn on screen, so
@@ -2412,7 +2470,8 @@
                 setPlaceholderState(job.placeholder, 'loading');
                 updatePhotoStatus();
                 let res = null;
-                try { res = await photoPipeline(job.nickname, null); }
+                const trace = [];
+                try { res = await photoPipeline(job.nickname, trace); }
                 catch(e) { console.error('[ASL] photo fill failed for', job.nickname, e); }
                 if (res && res.lockedOut) { lockoutDetected = true; break; }
                 if (res && res.lastActivity) await saveActivity(job.nickname, res.lastActivity);
@@ -2422,7 +2481,9 @@
                 }
                 if (!saved) {
                     setPlaceholderState(job.placeholder, 'none');
-                    await markPhotoTried(job.nickname);
+                    // The pipeline already narrates every step; keep the last
+                    // one so the card can say why instead of showing a "?".
+                    await markPhotoTried(job.nickname, trace[trace.length - 1]);
                 }
                 await stampRefreshed(job.nickname);
                 // Redraw the card from the stored record so the picture AND the
@@ -2469,11 +2530,28 @@
         } catch(e) { console.error('[ASL] stampRefreshed failed:', e); }
     }
 
-    async function markPhotoTried(nickname) {
+    // photoTried is a week-long "don't ask again". Every one of those verdicts
+    // was reached while genuine avatars were being refused, so they have to go
+    // with the blacklist that caused them.
+    async function clearPhotoGiveUps() {
+        try {
+            const all = await dbGetAllResults();
+            const stale = all.filter(p => p.photoTried || p.photoReason);
+            if (!stale.length) return;
+            for (const p of stale) { p.photoTried = null; p.photoReason = null; }
+            await dbPutResults(stale);
+            console.log('[ASL] Reset', stale.length, 'give-up-on-photo marks');
+        } catch(e) { console.error('[ASL] clearPhotoGiveUps failed:', e); }
+    }
+
+    async function markPhotoTried(nickname, reason) {
         try {
             const rec = await dbGetResult(nickname);
             if (!rec) return;
             rec.photoTried = new Date().toISOString();
+            // Say WHY, on the card. A silent "?" is indistinguishable from a
+            // profile that simply has no picture.
+            if (reason) rec.photoReason = String(reason).slice(0, 90);
             await dbPutResults([rec]);
         } catch(e) { console.error('[ASL] markPhotoTried failed:', e); }
     }
@@ -2542,6 +2620,10 @@
         if ((!pic || stale) && !cooling) {
             queuePhoto(p.nickname, ph, pic ? null : p.photoTried, d, activityDays);
         }
+        // A missing photo that will not say why is the same shape as a profile
+        // that has none. Name it.
+        const photoNote = (!pic && p.photoReason)
+            ? `<div class="m" style="color:#b86">No photo: ${esc(p.photoReason)}</div>` : '';
         const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
         let activityLine = '';
         if (p.activityChecked) {
@@ -2561,7 +2643,7 @@
             }
         }
         d.appendChild(avLink);
-        const infoHtml = `<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}${activityLine}</div><div class="act"><a href="${esc(p.url)}" target="_blank">Profile</a><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Message</a></div>`;
+        const infoHtml = `<div class="i"><a href="${esc(p.url)}" target="_blank">${esc(p.nickname)}</a>${meta?`<div class="m">${esc(meta)}</div>`:''}${p.location?`<div class="m">${esc(p.location)}</div>`:''}${activityLine}${photoNote}</div><div class="act"><a href="${esc(p.url)}" target="_blank">Profile</a><a href="https://fetlife.com/conversations/new?with=${esc(p.nickname)}" target="_blank">Message</a></div>`;
         d.insertAdjacentHTML('beforeend', infoHtml);
         return d;
     }
@@ -2675,6 +2757,39 @@
             if (nEl) nEl.textContent = String(n);
         };
         setDeadToggle('asl-hidden-wrap', 'asl-hidden-n', deadResults);
+
+        // What the database actually holds for the list on screen. "Is this
+        // working?" should be answerable by reading the panel, not by guessing
+        // from the cards that happen to be scrolled into view.
+        const health = document.getElementById('asl-health');
+        if (health) {
+            const pool = shownResults;
+            if (!pool.length) { health.textContent = ''; }
+            else {
+                const pics = await dbGetAvatarKeys();
+                const withPic = pool.filter(p => pics.has(p.nickname)).length;
+                const checked = pool.filter(p => p.activityChecked).length;
+                const dated = pool.filter(p => p.lastActivity).length;
+                const errs = {};
+                for (const p of pool) {
+                    if (p.activityChecked && p.activityError) {
+                        const k = String(p.activityError);
+                        errs[k] = (errs[k] || 0) + 1;
+                    }
+                }
+                const errBits = Object.keys(errs).sort((a, b) => errs[b] - errs[a])
+                    .map(k => errs[k] + ' x ' + k);
+                const parts = [
+                    withPic + ' of ' + pool.length + ' have a photo',
+                    checked + ' checked',
+                    dated + ' with a date',
+                ];
+                if (errBits.length) parts.push('failed: ' + errBits.join(', '));
+                const never = pool.length - checked;
+                if (never) parts.push(never + ' never checked');
+                health.textContent = parts.join('  \u00b7  ');
+            }
+        }
         setDeadToggle('asl-active-hidden-wrap', 'asl-active-hidden-n', deadActive);
         const rtab = document.getElementById('asl-rtab-count');
         if (rtab) rtab.textContent = total ? ('(' + total + ')') : '';
@@ -2828,9 +2943,12 @@
     if (location.hostname === 'fetlife.com') {
         (async function init() {
             await migrateFromLocalStorage();
+            const repaired = repairChromeLists();
             seedChromeFromHeader();
             await purgeSharedAvatars();
             buildUI();
+
+            if (repaired) await clearPhotoGiveUps();
 
             const isSearching = checkForOngoingSearch();
 
