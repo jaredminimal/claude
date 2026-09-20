@@ -1,0 +1,11 @@
+{
+  "name": "fetlife-asl-search",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --check fetlife-asl-search-activity-v7.user.js && node tests/storage.test.mjs && node tests/filters.test.mjs"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0"
+  }
+}

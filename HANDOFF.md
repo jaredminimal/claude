@@ -1,7 +1,7 @@
 # FetLife ASL Search — session handoff
 
-Written 2026-09-19. Everything below is the state at commit `229d5a0`, script
-version **9.2.0**, working tree clean and pushed.
+Written 2026-09-19, updated 2026-09-20. Everything below is the state at
+script version **9.4.0**, working tree clean and pushed.
 
 ---
 
@@ -114,17 +114,39 @@ Each of these cost real debugging time or a lockout. Treat them as settled.
 
 ## 4. Storage layout
 
-**IndexedDB** — db `asl_search_db`, version 2
+**IndexedDB** — db `asl_search_db`, version 3
 
 - store `results`, keyPath `nickname`
 - store `seen` (nicknames imported from CSV for dedup)
+- store `avatars`, keyPath `nickname`, value `{nickname, avatar}` — **added in
+  v9.4.0**
+
+**Pictures live apart from the records, and this matters.** Drawing any list
+has to load every record in order to sort and filter it, and a record carrying
+a base64 photo is a thousand times bigger than one that does not. At 29,013
+profiles `dbGetAllResults()` was reading a couple of hundred megabytes — on
+panel open, on every sort change, and on **every keystroke in the Find box**.
+Measured on a 2,000-profile library in `tests/storage.test.mjs`: 17.7 MB before
+the split, 0.44 MB after, a 40x cut that scales with the library.
+
+`dbPutResults` is the single chokepoint. Anything that sets `.avatar` on a
+record and saves it lands there, and the picture is routed to the `avatars`
+store; an empty `.avatar` means remove it, which is how a dead CDN link gets
+cleared. No call site needs to know where photos live. `dbDelete`,
+`dbDeleteMany` and `dbClearResults` take the picture with the record, so there
+are no orphans.
+
+Existing libraries are moved across by `migrateAvatarsOutOfRecords`, in chunks
+of 250, outside the version-change transaction so a big library does not freeze
+the tab. **It is resumable by construction**: a record that still has an
+`.avatar` is a record still to do. `buildProfileCard` reads both places, so a
+half-moved library still draws every face it has.
 
 **Record fields**
 
 | field | meaning |
 |---|---|
 | `nickname`, `age`, `gender`, `role`, `location`, `url` | from the crawl |
-| `avatar` | base64 `data:` URI, or a bare CDN URL if the download failed, or `''` |
 | `batch` | integer search number (140 = the 140th search run) |
 | `batchPages` | e.g. `"1-500"` |
 | `foundAt` | epoch ms when crawled (also used to order within a page) |
@@ -148,7 +170,13 @@ Each of these cost real debugging time or a lockout. Treat them as settled.
 
 ## 5. Architecture as it stands (v9.2.0)
 
-Three tabs: **Search / Results / Active**.
+Three tabs: **Search / Results / Active**. Both Results and Active carry a
+**Search dropdown** (newest first, each option carrying the date and count;
+records predating batches group under "Earlier results") and a **Show deleted
+& private** checkbox, off by default. Selecting one search drops the batch
+dividers, since they only earn their place when more than one search is in
+view. Counts and buttons keep describing the whole set, so a narrowed view can
+never make a bulk action hit the wrong profiles.
 
 **Phase 1 — crawl.** Real page navigation. Scrapes member cards from the
 rendered DOM and base64s each avatar immediately. This path has always been
@@ -193,11 +221,27 @@ Confirmed by the user's screenshots on 2026-09-17:
 
 Scale at handoff: **29,013 results, ~3,062 active, batches up to 140.**
 
+Proven by `npm test` (2026-09-20), which runs the real functions lifted out of
+the script against `fake-indexeddb`:
+
+- The avatar migration moves every photo exactly once, loses none, survives
+  being interrupted half way, and is a no-op on a second run.
+- Deleting a record, a batch of records, or clearing everything takes the
+  photos with it.
+- A renamed profile keeps its face.
+- A page of 50 cards loads at most 50 photos and nobody else's.
+- The per-search grouping, ordering, counts, and the composition of the Search
+  and Find filters.
+
+**Not proven, and cannot be from here:** anything that talks to FetLife, and
+anything about how the panel looks or feels on a real 29,013-record library.
+The speed claim is a measurement of bytes read, not of the user's screen.
+
 ---
 
 ## 7. Outstanding work, in priority order
 
-### 7.1 Per-search view — this is the live request
+### 7.1 Per-search view — DONE in v9.3.0
 
 The user's words: *"get all these profiles and recent searches cleaned up and
 accurate for review... I can see the last search of people that I did clearly."*
@@ -212,19 +256,21 @@ batches newest-first with counts, e.g. `Search 140 — Sep 17 (412)`, plus an
 **no stored batch timestamp** — derive the date from the minimum `foundAt`
 across the batch.
 
-Wire it the same way the Find box is wired: filter the list before
-`renderProfileList`, leave the counts and buttons describing the whole set so a
-filtered view can never make a bulk action hit the wrong profiles.
+Done as described. The date is derived from the minimum `foundAt` across the
+batch, since no batch timestamp was ever stored.
 
-Consider also making the background refresh worker prioritise the batch
-currently being viewed.
+The worker prioritisation came free: it only ever works on cards drawn on
+screen, so narrowing the list already points it at that search. `prunePhotoQueue`
+re-points leftover jobs at the redrawn card when the person is still listed, and
+drops them when they are not.
 
-### 7.2 Cleanup
+### 7.2 Cleanup — DONE in v9.3.0
 
-Hide `gone` (404) and `restricted` (private) profiles from the lists by default,
-and offer one explicit "Remove N deleted accounts" action with a confirmation.
-Keep it non-destructive by default — the user has 29,013 records and no backup
-beyond a CSV export.
+Done. Both are hidden from both lists, a checkbox with the count brings them
+back, and one button removes **only** 404s behind a confirmation that says what
+it will do. Private profiles are never removed — they are real people behind a
+closed feed. Hiding them also stops the background worker retrying 404s daily
+forever, which it had been doing.
 
 ### 7.3 Unverified
 
@@ -237,6 +283,37 @@ The background worker only touches cards actually on screen. Most of the 29,013
 records will never be refreshed unless the user scrolls to them. If a
 whole-library refresh is wanted it needs to be an explicit, interruptible job
 with a progress bar — not a background trickle.
+
+### 7.5 The strategic question, answered 2026-09-20
+
+The user asked whether Tampermonkey is the right host at all, or whether the
+whole thing should be rebuilt. The answer given, and the reasoning, so it does
+not get re-litigated:
+
+**Stay on Tampermonkey.** The binding constraint on this project is FetLife's
+rate limit — one profile every 3-6 seconds or you get locked out — and their
+login. No rewrite changes either. 29,000 profiles is 30+ hours of requests
+whatever runs them. What the felt degradation actually was: the storage
+problem in §4, which is fixed, not anything about being a userscript.
+
+What the alternatives would genuinely buy, if the question comes back:
+
+- **A real MV3 extension.** A background service worker means a crawl or a
+  check survives navigation and does not need a FetLife tab parked open. Same
+  storage, same rate limit. Costs an unpacked install and a different update
+  ritual. This is the next step if one is ever needed, not a full rewrite.
+- **A local Node app with SQLite and photos on disk.** Removes the scale
+  ceiling entirely and can run overnight. Costs the user a toolchain they
+  would have to maintain, and it is still not faster.
+- **Server-side with exported cookies.** Ruled out. Moves their session off
+  their machine, and a datacenter IP gets locked out faster than their home
+  one.
+
+The more useful observation, which was put to the user: 29,013 profiles is a
+haystack, not a review list. The tool was built for breadth when what is wanted
+is a short, current, reviewable list. Tighter searches — narrow age band, one
+city, 50 pages not 500 — checked one search at a time, is the workflow the
+§7.1 dropdown now makes possible.
 
 ---
 
@@ -289,6 +366,7 @@ grep -n "saveAvatar\|pickOwnerAvatar\|startPhotoWorker\|photoPipeline" \
 grep -n "renderProfileList\|loadAndDisplayResults" \
   fetlife-asl-search-activity-v7.user.js                   # the list rendering
 node --check fetlife-asl-search-activity-v7.user.js
+npm install && npm test        # storage + filter suites, see tests/README.md
 ```
 
 Start with §7.1. That is what the user asked for last.

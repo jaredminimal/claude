@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        9.3.0
+// @version        9.4.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -37,15 +37,27 @@
     const STORAGE_KEY = 'asl_search_state';
     const PROGRESS_KEY = 'asl_search_progress';
     const DB_NAME = 'asl_search_db';
-    const DB_VERSION = 2;
+    const DB_VERSION = 3;
     const STORE_NAME = 'results';
     const SEEN_STORE = 'seen';
+    // Pictures live apart from the profile records. Drawing any list has to
+    // load every record to sort and filter it, and a record carrying a base64
+    // photo is a thousand times bigger than one that does not - at 29,000
+    // profiles that was hundreds of megabytes read back on every keystroke in
+    // the Find box. Split out, the list reads a few megabytes and the photos
+    // are fetched only for the fifty cards actually on screen.
+    const AVATAR_STORE = 'avatars';
 
     // =====================
     // IndexedDB STORAGE (replaces localStorage for results)
     // =====================
+    // Every database call used to open its own connection and never close it,
+    // so a long session accumulated thousands of them. One connection, reused,
+    // and dropped if it ever closes or another tab needs to upgrade.
+    let dbPromise = null;
     function openDB() {
-        return new Promise((resolve, reject) => {
+        if (dbPromise) return dbPromise;
+        dbPromise = new Promise((resolve, reject) => {
             const req = indexedDB.open(DB_NAME, DB_VERSION);
             req.onupgradeneeded = (e) => {
                 const db = e.target.result;
@@ -55,10 +67,31 @@
                 if (!db.objectStoreNames.contains(SEEN_STORE)) {
                     db.createObjectStore(SEEN_STORE, { keyPath: 'nickname' });
                 }
+                if (!db.objectStoreNames.contains(AVATAR_STORE)) {
+                    db.createObjectStore(AVATAR_STORE, { keyPath: 'nickname' });
+                }
             };
-            req.onsuccess = () => resolve(req.result);
+            // A version change cannot happen while another tab holds the old
+            // database open, and the wait is silent. Say so instead.
+            req.onblocked = () => {
+                console.warn('[ASL] Database upgrade blocked by another FetLife tab.');
+                const el = document.getElementById('asl-migrate');
+                if (el) {
+                    el.style.display = 'block';
+                    el.textContent = 'Close your other FetLife tabs - the database cannot upgrade while they are open.';
+                }
+            };
+            req.onsuccess = () => {
+                const db = req.result;
+                db.onversionchange = () => { db.close(); dbPromise = null; };
+                db.onclose = () => { dbPromise = null; };
+                resolve(db);
+            };
             req.onerror = () => reject(req.error);
         });
+        // A failed open must not be remembered, or every later call inherits it.
+        dbPromise.catch(() => { dbPromise = null; });
+        return dbPromise;
     }
 
     async function dbGetAllResults() {
@@ -93,14 +126,92 @@
         });
     }
 
+    // The one place that decides where a picture goes. Anything that sets
+    // .avatar on a record and saves it lands here, so no call site has to know
+    // that photos live in their own store. An empty avatar means "remove it" -
+    // that is how a dead CDN link gets cleared.
     async function dbPutResults(results) {
+        const pics = [];
+        const rows = results.map(r => {
+            if (!Object.prototype.hasOwnProperty.call(r, 'avatar')) return r;
+            pics.push({ nickname: r.nickname, avatar: r.avatar || '' });
+            const copy = Object.assign({}, r);
+            delete copy.avatar;
+            return copy;
+        });
         const db = await openDB();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE_NAME, 'readwrite');
+            const tx = db.transaction([STORE_NAME, AVATAR_STORE], 'readwrite');
             const store = tx.objectStore(STORE_NAME);
-            for (const r of results) {
-                store.put(r);
+            const picStore = tx.objectStore(AVATAR_STORE);
+            for (const r of rows) store.put(r);
+            for (const p of pics) {
+                if (p.avatar) picStore.put(p);
+                else picStore.delete(p.nickname);
             }
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error);
+        });
+    }
+
+    // Only the pictures asked for, which is only ever the cards being drawn.
+    async function dbGetAvatars(nicknames) {
+        const map = new Map();
+        if (!nicknames || !nicknames.length) return map;
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(AVATAR_STORE, 'readonly');
+            const store = tx.objectStore(AVATAR_STORE);
+            for (const n of nicknames) {
+                const req = store.get(n);
+                req.onsuccess = () => {
+                    if (req.result && req.result.avatar) map.set(n, req.result.avatar);
+                };
+            }
+            tx.oncomplete = () => resolve(map);
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async function dbGetAvatar(nickname) {
+        const map = await dbGetAvatars([nickname]);
+        return map.get(nickname) || '';
+    }
+
+    // Who has a picture at all, without reading a single one of them.
+    async function dbGetAvatarKeys() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(AVATAR_STORE, 'readonly');
+            const req = tx.objectStore(AVATAR_STORE).getAllKeys();
+            req.onsuccess = () => resolve(new Set(req.result || []));
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbDeleteAvatars(nicknames) {
+        if (!nicknames || !nicknames.length) return;
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(AVATAR_STORE, 'readwrite');
+            const store = tx.objectStore(AVATAR_STORE);
+            for (const n of nicknames) store.delete(n);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    // A profile that renamed itself keeps its face.
+    async function dbRenameAvatar(from, to) {
+        const pic = await dbGetAvatar(from);
+        if (!pic) return;
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(AVATAR_STORE, 'readwrite');
+            const store = tx.objectStore(AVATAR_STORE);
+            store.put({ nickname: to, avatar: pic });
+            store.delete(from);
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
@@ -109,8 +220,9 @@
     async function dbDelete(nickname) {
         const db = await openDB();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE_NAME, 'readwrite');
+            const tx = db.transaction([STORE_NAME, AVATAR_STORE], 'readwrite');
             tx.objectStore(STORE_NAME).delete(nickname);
+            tx.objectStore(AVATAR_STORE).delete(nickname);
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
@@ -120,9 +232,10 @@
         if (!nicknames.length) return;
         const db = await openDB();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE_NAME, 'readwrite');
+            const tx = db.transaction([STORE_NAME, AVATAR_STORE], 'readwrite');
             const store = tx.objectStore(STORE_NAME);
-            for (const n of nicknames) store.delete(n);
+            const picStore = tx.objectStore(AVATAR_STORE);
+            for (const n of nicknames) { store.delete(n); picStore.delete(n); }
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
@@ -131,11 +244,11 @@
     async function dbClearResults() {
         const db = await openDB();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE_NAME, 'readwrite');
-            const store = tx.objectStore(STORE_NAME);
-            const req = store.clear();
-            req.onsuccess = () => resolve();
-            req.onerror = () => reject(req.error);
+            const tx = db.transaction([STORE_NAME, AVATAR_STORE], 'readwrite');
+            tx.objectStore(STORE_NAME).clear();
+            tx.objectStore(AVATAR_STORE).clear();
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
         });
     }
 
@@ -339,6 +452,7 @@
                     <button data-t="results">Results <span id="asl-rtab-count"></span></button>
                     <button data-t="active">Active <span id="asl-atab-count"></span></button>
                 </div>
+                <div id="asl-migrate" style="display:none;margin-bottom:8px;padding:8px 10px;background:#16213e;border-radius:6px;font-size:12px;color:#ccc"></div>
                 <div id="asl-activity-progress"></div>
                 <button class="asl-b" id="asl-stop-activity" style="display:none">Stop Activity Check</button>
                 <div class="asl-tab on" id="asl-t-search">
@@ -539,6 +653,77 @@
             });
             sh.appendChild(a);
         });
+    }
+
+    // Existing libraries have their pictures inside the profile records. Move
+    // them across in chunks, outside the version-change transaction, so a big
+    // library does not freeze the tab. It is resumable by construction: a
+    // record that still has an .avatar is a record still to do, so an
+    // interrupted run simply carries on next time. The flag only skips the
+    // scan once everything is known to be across.
+    const AVATAR_SPLIT_FLAG = 'asl_avatars_split_done';
+    const SPLIT_CHUNK = 250;
+
+    function moveAvatarChunk(db, nicknames) {
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction([STORE_NAME, AVATAR_STORE], 'readwrite');
+            const store = tx.objectStore(STORE_NAME);
+            const picStore = tx.objectStore(AVATAR_STORE);
+            let moved = 0;
+            for (const n of nicknames) {
+                const req = store.get(n);
+                req.onsuccess = () => {
+                    const rec = req.result;
+                    if (!rec || !Object.prototype.hasOwnProperty.call(rec, 'avatar')) return;
+                    if (rec.avatar) {
+                        picStore.put({ nickname: rec.nickname, avatar: rec.avatar });
+                        moved++;
+                    }
+                    delete rec.avatar;
+                    store.put(rec);
+                };
+            }
+            tx.oncomplete = () => resolve(moved);
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error);
+        });
+    }
+
+    async function migrateAvatarsOutOfRecords(onProgress) {
+        if (localStorage.getItem(AVATAR_SPLIT_FLAG)) return 0;
+        const db = await openDB();
+        const keys = [...await dbGetNicknames()];
+        let moved = 0;
+        for (let i = 0; i < keys.length; i += SPLIT_CHUNK) {
+            const slice = keys.slice(i, i + SPLIT_CHUNK);
+            moved += await moveAvatarChunk(db, slice);
+            if (onProgress) onProgress(Math.min(i + SPLIT_CHUNK, keys.length), keys.length);
+            // Hand the tab back between chunks so the panel stays usable.
+            await new Promise(r => setTimeout(r, 0));
+        }
+        localStorage.setItem(AVATAR_SPLIT_FLAG, '1');
+        return moved;
+    }
+
+    async function splitAvatarsIfNeeded() {
+        const el = document.getElementById('asl-migrate');
+        try {
+            const moved = await migrateAvatarsOutOfRecords((done, total) => {
+                if (!el || !total) return;
+                el.style.display = 'block';
+                el.textContent = 'Tidying up stored photos so the lists stay quick - ' +
+                    done.toLocaleString() + ' of ' + total.toLocaleString() +
+                    '. This happens once, and you can keep using the panel.';
+            });
+            if (el) el.style.display = 'none';
+            if (moved) {
+                console.log('[ASL] Moved', moved, 'pictures into their own store');
+                await loadAndDisplayResults();
+            }
+        } catch(e) {
+            console.error('[ASL] Avatar split failed, will retry next load:', e);
+            if (el) el.style.display = 'none';
+        }
     }
 
     // =====================
@@ -1401,7 +1586,10 @@
         cutoff.setDate(cutoff.getDate() - activityDays);
         const results = await dbGetAllResults();
         let active = results.filter(p => p.activityChecked && p.lastActivity && new Date(p.lastActivity) >= cutoff);
-        if (skipWithPics) active = active.filter(p => !p.avatar);
+        if (skipWithPics) {
+            const have = await dbGetAvatarKeys();
+            active = active.filter(p => !have.has(p.nickname));
+        }
         return active;
     }
 
@@ -1671,6 +1859,7 @@
             const canonical = result && result.canonical;
             if (canonical && canonical.toLowerCase() !== p.nickname.toLowerCase()) {
                 console.log('[ASL] Username change:', p.nickname, '→', canonical);
+                await dbRenameAvatar(p.nickname, canonical);
                 await dbDelete(p.nickname);
                 p.nickname = canonical;
                 p.url = 'https://fetlife.com/' + canonical;
@@ -1974,13 +2163,8 @@
             brokenAvatarQueue.clear();
             brokenFlushTimer = null;
             try {
-                const all = await dbGetAllResults();
-                const toClear = all.filter(p => names.includes(p.nickname) && p.avatar);
-                if (toClear.length) {
-                    for (const p of toClear) p.avatar = '';
-                    await dbPutResults(toClear);
-                    console.log('[ASL] Cleared', toClear.length, 'dead avatar URLs');
-                }
+                await dbDeleteAvatars(names);
+                console.log('[ASL] Cleared', names.length, 'dead avatar URLs');
             } catch(e) { console.error('[ASL] markAvatarBroken failed:', e); }
         }, 1500);
     }
@@ -2132,7 +2316,8 @@
                 // refreshed "last active" line are both current.
                 if (job.card && job.card.isConnected) {
                     const fresh = await dbGetResult(job.nickname);
-                    if (fresh) job.card.replaceWith(buildProfileCard(fresh, job.activityDays));
+                    const pic = await dbGetAvatar(job.nickname);
+                    if (fresh) job.card.replaceWith(buildProfileCard(fresh, job.activityDays, pic));
                 } else if (saved && job.placeholder && job.placeholder.isConnected) {
                     job.placeholder.replaceWith(makeAvatarImg(job.nickname, res.avatar));
                 }
@@ -2212,17 +2397,21 @@
         return img;
     }
 
-    function buildProfileCard(p, activityDays) {
+    function buildProfileCard(p, activityDays, avatar) {
         const d = document.createElement('div');
         d.className = 'asl-r';
         d.dataset.nick = p.nickname;
+        // Pictures are looked up for the cards being drawn and handed in. A
+        // record written before the split still carries its own, so read both
+        // and a half-moved library still draws every face it has.
+        const pic = avatar || p.avatar || '';
         const avLink = document.createElement('a');
         avLink.className = 'av';
         avLink.href = p.url;
         avLink.target = '_blank';
         let ph = null;
-        if (p.avatar) {
-            avLink.appendChild(makeAvatarImg(p.nickname, p.avatar));
+        if (pic) {
+            avLink.appendChild(makeAvatarImg(p.nickname, pic));
         } else {
             // No picture yet — show a placeholder and have the background
             // filler replace it in place once it has one.
@@ -2237,8 +2426,8 @@
                       new Date(p.checkedAt).getTime() < staleAfter;
         const cooling = p.refreshTried &&
             Date.now() - new Date(p.refreshTried).getTime() < REFRESH_COOLDOWN_MS;
-        if ((!p.avatar || stale) && !cooling) {
-            queuePhoto(p.nickname, ph, p.avatar ? null : p.photoTried, d, activityDays);
+        if ((!pic || stale) && !cooling) {
+            queuePhoto(p.nickname, ph, pic ? null : p.photoTried, d, activityDays);
         }
         const meta = [p.age||'', p.gender||'', p.role||''].filter(Boolean).join(' / ');
         let activityLine = '';
@@ -2264,7 +2453,7 @@
         return d;
     }
 
-    function renderProfileList(containerId, profiles, sortMode, activityDays, showBatchDividers) {
+    async function renderProfileList(containerId, profiles, sortMode, activityDays, showBatchDividers) {
         const container = document.getElementById(containerId);
         if (!container) return;
         container.innerHTML = '';
@@ -2273,9 +2462,14 @@
         const loadMoreId = containerId + '-more';
         let shown = 0;
 
-        function renderBatch() {
+        async function renderBatch() {
             const batch = sorted.slice(shown, shown + PAGE_SIZE);
-            let currentBatch = shown > 0 ? (sorted[shown - 1] || {}).batch : null;
+            // Claim this page before awaiting, so a double-click on Load More
+            // cannot draw the same fifty profiles twice.
+            const from = shown;
+            shown += batch.length;
+            const pics = await dbGetAvatars(batch.map(p => p.nickname));
+            let currentBatch = from > 0 ? (sorted[from - 1] || {}).batch : null;
             for (const p of batch) {
                 if (showBatchDividers && sortMode === 'newest' && p.batch && p.batch !== currentBatch) {
                     currentBatch = p.batch;
@@ -2284,9 +2478,8 @@
                     divider.textContent = '— Search ' + p.batch + ' (pages ' + (p.batchPages || '?') + ') —';
                     container.appendChild(divider);
                 }
-                container.appendChild(buildProfileCard(p, activityDays));
+                container.appendChild(buildProfileCard(p, activityDays, pics.get(p.nickname)));
             }
-            shown += batch.length;
             const oldBtn = document.getElementById(loadMoreId);
             if (oldBtn) oldBtn.remove();
             if (shown < sorted.length) {
@@ -2296,11 +2489,11 @@
                 btn.style.background = '#47a';
                 btn.style.color = '#fff';
                 btn.textContent = 'Load More (' + (sorted.length - shown) + ' remaining)';
-                btn.addEventListener('click', renderBatch);
+                btn.addEventListener('click', () => { renderBatch(); });
                 container.appendChild(btn);
             }
         }
-        renderBatch();
+        await renderBatch();
     }
 
     async function loadAndDisplayResults() {
@@ -2405,8 +2598,8 @@
         const resultsSort = (document.getElementById('asl-sort') || {}).value || 'newest';
         const activeSort = (document.getElementById('asl-active-sort') || {}).value || 'newest';
         // Dividers only earn their place when more than one search is in view.
-        renderProfileList('asl-res', shownResults, resultsSort, activityDays, rBatch === 'all');
-        renderProfileList('asl-active-res', shownActive, activeSort, activityDays, aBatch === 'all');
+        await renderProfileList('asl-res', shownResults, resultsSort, activityDays, rBatch === 'all');
+        await renderProfileList('asl-active-res', shownActive, activeSort, activityDays, aBatch === 'all');
 
         const liveCards = new Map();
         for (const el of document.querySelectorAll('#asl .asl-r[data-nick]')) {
@@ -2518,6 +2711,9 @@
 
             if (!isSearching) {
                 await loadAndDisplayResults();
+                // After the first draw, so the panel is usable while it runs,
+                // and never during a crawl - that navigates the page away.
+                splitAvatarsIfNeeded();
             }
         })();
     }
