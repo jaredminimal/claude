@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        9.4.0
+// @version        9.6.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -36,6 +36,7 @@
 
     const STORAGE_KEY = 'asl_search_state';
     const PROGRESS_KEY = 'asl_search_progress';
+    const PANEL_OPEN_KEY = 'asl_panel_open';
     const DB_NAME = 'asl_search_db';
     const DB_VERSION = 3;
     const STORE_NAME = 'results';
@@ -499,6 +500,8 @@
                         <label class="fl" style="margin:0;white-space:nowrap">Search</label>
                         <select id="asl-batch" style="margin:0;flex:1;min-width:0"><option value="all">All searches</option></select>
                     </div>
+                    <button class="asl-b" id="asl-recheck-batch" style="background:#d80;color:#fff;display:none">Re-check this search</button>
+                    <label class="fl" id="asl-recheck-batch-skip-wrap" style="display:none;margin:4px 0 0;text-transform:none;letter-spacing:0;font-size:12px;color:#999;font-weight:400"><input type="checkbox" id="asl-recheck-batch-skip" checked> Skip ones that already have a photo and a recent check</label>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Sort by</label>
                         <select id="asl-sort" style="width:auto;margin:0">
@@ -524,9 +527,9 @@
                         <input type="number" id="asl-act-min" min="1" max="60" step="0.5" value="3" style="width:60px;margin:0">
                         <label class="fl" style="margin:0;white-space:nowrap">to</label>
                         <input type="number" id="asl-act-max" min="1" max="120" step="0.5" value="6" style="width:60px;margin:0">
-                        <label class="fl" style="margin:0;white-space:nowrap">sec / profile</label>
+                        <label class="fl" style="margin:0;white-space:nowrap">sec / request</label>
                     </div>
-                    <p style="font-size:11px;color:#c66;margin:2px 0 6px">Going below ~3s risks a FetLife lockout.</p>
+                    <p style="font-size:11px;color:#c66;margin:2px 0 6px">Going below ~3s risks a FetLife lockout. A profile costs one request, or two when its photo has to be fetched from the profile page.</p>
                     <button class="asl-b" id="asl-check-activity">Check Activity Now</button>
                     <button class="asl-b" id="asl-retry-failed" style="background:#d80;color:#fff;display:none">Retry Failed Checks</button>
                     <button class="asl-b" id="asl-csv">Export All to CSV</button>
@@ -593,8 +596,15 @@
             });
         });
 
-        btn.addEventListener('click', () => panel.classList.toggle('open'));
-        document.getElementById('asl-x').addEventListener('click', () => panel.classList.remove('open'));
+        // The crawl navigates the page, which rebuilds this panel closed. Keep
+        // it open across those navigations so a long crawl can be watched.
+        const rememberOpen = () =>
+            localStorage.setItem(PANEL_OPEN_KEY, panel.classList.contains('open') ? '1' : '');
+        btn.addEventListener('click', () => { panel.classList.toggle('open'); rememberOpen(); });
+        document.getElementById('asl-x').addEventListener('click', () => {
+            panel.classList.remove('open'); rememberOpen();
+        });
+        if (localStorage.getItem(PANEL_OPEN_KEY)) panel.classList.add('open');
         document.getElementById('asl-spd').addEventListener('input', function() {
             document.getElementById('asl-dl').textContent = this.value;
         });
@@ -611,7 +621,13 @@
         document.getElementById('asl-import').addEventListener('click', () => document.getElementById('asl-import-file').click());
         document.getElementById('asl-import-file').addEventListener('change', importCSVForDedup);
         document.getElementById('asl-clear').addEventListener('click', clearResults);
-        document.getElementById('asl-check-activity').addEventListener('click', startActivityCheck);
+        // Explicitly true. This used to be wired straight to the function, so
+        // the click event arrived as `refreshAvatars` and was truthy by
+        // accident - which is why every run was quietly fetching photos too,
+        // at two or three requests per profile, while the notes said one.
+        // Refreshing photos IS wanted; being surprised by the request count is
+        // not, and the pacer above now charges for it honestly.
+        document.getElementById('asl-check-activity').addEventListener('click', () => startActivityCheck(true));
         document.getElementById('asl-retry-failed').addEventListener('click', retryFailedChecks);
         document.getElementById('asl-recheck').addEventListener('click', recheckByAge);
         document.getElementById('asl-recheck-last').addEventListener('click', recheckLastN);
@@ -624,6 +640,7 @@
         document.getElementById('asl-show-hidden').addEventListener('change', loadAndDisplayResults);
         document.getElementById('asl-active-show-hidden').addEventListener('change', loadAndDisplayResults);
         document.getElementById('asl-remove-gone').addEventListener('click', removeGoneProfiles);
+        document.getElementById('asl-recheck-batch').addEventListener('click', recheckSelectedSearch);
         let findTimer = null;
         for (const id of ['asl-find', 'asl-active-find']) {
             document.getElementById(id).addEventListener('input', () => {
@@ -1075,14 +1092,20 @@
     function fetchImageAsBase64(url, trace) {
         const note = m => { if (trace) trace.push(m); };
         if (!url || url.startsWith('data:')) return Promise.resolve(url);
-        if (!FL_IMG_HOST.test(url)) {
-            console.log('[ASL] Skipping non-FetLife URL:', url.substring(0, 60));
-            note('Skipped: not a FetLife image host');
+        // This used to accept any fetlife.com URL, which is not the same
+        // question. An <img> with an empty or relative src resolves to the
+        // PAGE's own address, and that address passed - so the HTML of the
+        // kinksters page was downloaded and saved as somebody's photo. Ask the
+        // question that was always meant: is this a member's picture on the
+        // picture CDN, and not site furniture?
+        if (!isMemberPicture(url)) {
+            console.log('[ASL] Not a member picture, skipping:', url.substring(0, 60));
+            note('Skipped: not a member picture');
             return Promise.resolve('');
         }
         return new Promise((resolve) => {
             try {
-                GM_xmlhttpRequest({
+                gmRequest({
                     method: 'GET',
                     url: url,
                     responseType: 'arraybuffer',
@@ -1138,9 +1161,38 @@
     }
 
     // GM_xmlhttpRequest wrapper — bypasses FetLife's service worker
+    // EVERY request to fetlife.com goes through here. The delay setting was
+    // always meant to be the gap between requests, but it was applied per
+    // PROFILE - and a profile that also refreshes its photo costs two or three
+    // requests, fired back to back, then waits. That burst is the shape that
+    // caused the lockout in the first place (a 1.5-3s gap with three requests
+    // per profile). Pacing here makes the rate a property of the script rather
+    // than of whichever loop is running, so a profile that costs three
+    // requests takes three slots.
+    //
+    // CDN image downloads are deliberately NOT paced: they are a different
+    // host, the browser is already loading those same images to draw the page,
+    // and pacing them would make a 500-page crawl take days.
+    const PACED_HOST = /^https?:\/\/(www\.)?fetlife\.com\//i;
+    let nextSlot = 0;
+    function requestGap() {
+        const el = id => (document.getElementById(id) || {}).value;
+        const min = (parseFloat(el('asl-act-min')) || 3) * 1000;
+        const max = (parseFloat(el('asl-act-max')) || 6) * 1000;
+        return randomDelay(min, Math.max(max, min + 1));
+    }
+    function gmRequest(opts) {
+        if (!opts || !PACED_HOST.test(opts.url || '')) { GM_xmlhttpRequest(opts); return; }
+        const now = Date.now();
+        const wait = Math.max(0, nextSlot - now);
+        nextSlot = Math.max(now, nextSlot) + requestGap();
+        if (wait) setTimeout(() => GM_xmlhttpRequest(opts), wait);
+        else GM_xmlhttpRequest(opts);
+    }
+
     function gmFetch(url, headers) {
         return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
+            gmRequest({
                 method: 'GET',
                 url: url,
                 headers: headers || {},
@@ -1932,6 +1984,63 @@
         document.querySelector('#asl-tabs button[data-t="active"]')?.click();
     }
 
+    // Re-run the whole job - activity AND photo - over one search. The other
+    // check buttons cannot reach this: "Check Activity" only takes profiles
+    // never checked, and the two re-check buttons on the Active tab only see
+    // profiles that are already active. A search whose photos and dates went
+    // wrong had no way back into the pipeline before this.
+    //
+    // It names its scope in its own label, so scoping it to the dropdown is
+    // not the trap the whole-set rule guards against: nothing here is
+    // ambiguous about which profiles it will touch.
+    function estimateMinutes(count) {
+        const el = id => (document.getElementById(id) || {}).value;
+        const avg = ((parseFloat(el('asl-act-min')) || 3) + (parseFloat(el('asl-act-max')) || 6)) / 2;
+        // A profile costs one request, or two when the photo is not in the
+        // feed and the profile page has to be read as well.
+        const lo = Math.round(count * avg / 60);
+        const hi = Math.round(count * avg * 2 / 60);
+        const fmt = m => m >= 90 ? (m / 60).toFixed(1) + ' hours' : Math.max(1, m) + ' minutes';
+        return lo === hi ? fmt(lo) : fmt(lo) + ' to ' + fmt(hi);
+    }
+
+    async function recheckSelectedSearch() {
+        const sel = ((document.getElementById('asl-batch') || {}).value) || 'all';
+        if (sel === 'all') return;
+        const label = sel === '0' ? 'the earlier results' : 'Search ' + sel;
+        const skip = !!(document.getElementById('asl-recheck-batch-skip') || {}).checked;
+
+        const all = await dbGetAllResults();
+        // Deleted and private profiles are never re-requested: they cannot
+        // resolve, and asking again only spends requests.
+        let list = all.filter(p => String(p.batch || 0) === sel && !isDeadEnd(p));
+        const total = list.length;
+        if (skip) {
+            const have = await dbGetAvatarKeys();
+            const freshAfter = Date.now() - STALE_ACTIVITY_MS;
+            list = list.filter(p => !(have.has(p.nickname) && p.activityChecked && p.checkedAt &&
+                                      new Date(p.checkedAt).getTime() >= freshAfter));
+        }
+        if (!list.length) {
+            alert(total
+                ? 'Nothing to do in ' + label + ' - all ' + total +
+                  ' profiles already have a photo and a recent check.\n\n' +
+                  'Untick the skip box to force all of them through again.'
+                : 'There are no profiles in ' + label + ' to check.');
+            return;
+        }
+        const ok = confirm(
+            'Re-check ' + list.length + ' profile' + (list.length === 1 ? '' : 's') +
+            ' in ' + label + '?\n\n' +
+            'This fetches their latest activity AND their photo, so they land in the ' +
+            'Active tab properly.\n\n' +
+            'At your current delay this takes roughly ' + estimateMinutes(list.length) + '. ' +
+            'You can stop it at any time, and running it again picks up where it left off.'
+        );
+        if (!ok) return;
+        startActivityCheck(true, list);
+    }
+
     // =====================
     // PARSE MEMBER CARD
     // =====================
@@ -1946,6 +2055,10 @@
             if (img) {
                 // Try multiple sources — FetLife may use lazy loading
                 avatar = img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('src') || '';
+                // An empty src resolves to the page's own URL. Only a real
+                // member picture is worth keeping, and refusing it here means
+                // a bad one is never stored even as a fallback.
+                if (avatar && !isMemberPicture(avatar)) avatar = '';
             }
 
             let infoText = rawText;
@@ -2587,6 +2700,18 @@
         if (clearBtn) clearBtn.style.display = total ? 'block' : 'none';
         // Always the whole set, whatever the list is narrowed to, and it says
         // the number out loud so there is nothing to infer.
+        // Scoped to the dropdown on purpose, and it says so in its own label.
+        const batchList = rBatch === 'all' ? [] :
+            results.filter(p => String(p.batch || 0) === rBatch && !isDeadEnd(p));
+        const rbBtn = document.getElementById('asl-recheck-batch');
+        const rbWrap = document.getElementById('asl-recheck-batch-skip-wrap');
+        if (rbBtn) {
+            rbBtn.style.display = batchList.length ? 'block' : 'none';
+            rbBtn.textContent = 'Re-check ' + (rBatch === '0' ? 'earlier results' : 'Search ' + rBatch) +
+                ' (' + batchList.length + ' profile' + (batchList.length === 1 ? '' : 's') + ')';
+        }
+        if (rbWrap) rbWrap.style.display = batchList.length ? 'block' : 'none';
+
         const goneCount = results.filter(p => p.gone).length;
         const goneBtn = document.getElementById('asl-remove-gone');
         if (goneBtn) {

@@ -1,7 +1,7 @@
 # FetLife ASL Search — session handoff
 
 Written 2026-09-19, updated 2026-09-20. Everything below is the state at
-script version **9.4.0**, working tree clean and pushed.
+script version **9.6.0**, working tree clean and pushed.
 
 ---
 
@@ -284,7 +284,34 @@ records will never be refreshed unless the user scrolls to them. If a
 whole-library refresh is wanted it needs to be an explicit, interruptible job
 with a progress bar — not a background trickle.
 
-### 7.5 The strategic question, answered 2026-09-20
+### 7.5 Found and fixed 2026-09-20 by the browser suite
+
+Three defects that reading the code had not surfaced in any prior session:
+
+1. **Every "Check Activity Now" run was making 2-3 requests per profile, not
+   one.** The button was wired `addEventListener('click', startActivityCheck)`,
+   so the MouseEvent arrived as the `refreshAvatars` argument and was truthy by
+   accident. §3 fact 7 states as settled that the script makes one request per
+   profile; it did not. This is the most plausible cause of the lockouts.
+   Fixed two ways: the call is explicit now, and **every request to fetlife.com
+   goes through `gmRequest`**, which paces them. The delay is now per REQUEST,
+   which is what it always claimed to be - a profile that costs three requests
+   takes three slots. CDN image downloads are deliberately not paced (different
+   host, the browser is loading those same images anyway, and pacing them would
+   make a 500-page crawl take days). Proven: 47 consecutive gaps, none under
+   900ms at a 1s setting.
+
+2. **`FL_IMG_HOST` matched any fetlife.com URL, not just picture URLs.** An
+   `<img>` with an empty or relative `src` resolves to the PAGE's own address,
+   which passed - so the HTML of the kinksters page was downloaded, base64'd
+   and saved as that person's photo. `isMemberPicture` (which already existed
+   and was already used by the photo pipeline) is now the test on both the
+   crawl path and the download path.
+
+3. **The panel closed on every crawl navigation**, so a 500-page crawl ran
+   unwatched. It now remembers it was open.
+
+### 7.6 The strategic question, answered 2026-09-20
 
 The user asked whether Tampermonkey is the right host at all, or whether the
 whole thing should be rebuilt. The answer given, and the reasoning, so it does
@@ -319,17 +346,22 @@ city, 50 pages not 500 — checked one search at a time, is the workflow the
 
 ## 8. Constraints on the session
 
-- **There is no browser / Chrome MCP available.** The user has asked for this
-  many times and it has been checked repeatedly, including with `ToolSearch` for
-  `claude-in-chrome`, `Claude_Browser`, and `computer-use` — none exist in this
-  environment. You cannot drive their Chrome, inspect the live page, or click
-  anything. Say so once, plainly, and move on; do not keep re-litigating it.
-- **You cannot test against FetLife.** It requires an authenticated session.
-  Every verification comes from the user's screenshots.
-- Therefore: `node --check` every change, reason carefully, and **be honest
-  about what is proven versus what is expected to work.** A large amount of
-  trust was burned in this session by shipping speculative fixes described as
-  solutions.
+- **There is no Chrome MCP** (`claude-in-chrome`, `Claude_Browser`,
+  `computer-use`). Re-checked 2026-09-20 with `ToolSearch`; still absent. It
+  would drive the *user's* Chrome anyway, which a cloud container cannot reach.
+- **You cannot test against the real FetLife.** It needs their login.
+- **But you CAN test almost everything else, and you must.** Playwright and
+  Chromium are both present (`/opt/pw-browsers/chromium-1194/chrome-linux/chrome`).
+  `npm test` runs the whole panel in real Chromium against a mock FetLife —
+  crawl, activity check, request pacing, the per-search view, the database
+  upgrade. See `tests/README.md`. **Do not hand the user a build that has not
+  been through it.** An earlier session concluded "no browser automation" and
+  shipped on reasoning alone; the browser suite found three real bugs in its
+  first two runs.
+- Therefore: **be honest about what is proven versus what is expected.** A large
+  amount of trust was burned by shipping speculative fixes described as
+  solutions. What the suite proves is that the script does what it intends;
+  what it cannot prove is that FetLife agrees.
 
 ---
 
