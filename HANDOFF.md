@@ -1,7 +1,7 @@
 # FetLife ASL Search — session handoff
 
 Written 2026-09-19, updated 2026-09-20. Everything below is the state at
-script version **9.8.0**, working tree clean and pushed.
+script version **9.10.0**, working tree clean and pushed.
 
 ---
 
@@ -353,6 +353,25 @@ line as `photoReason` and the card prints it; a health line under the counts
 reports photos / checked / dated / failures by code for whatever is on screen;
 and the activity check's completion message names the failures instead of
 reporting only actives and inactives.
+
+### 7.8 Two more, from the user reading the panel (2026-09-21)
+
+1. **The re-check button's count ignored its own skip box.** It advertised
+   "Re-check Search 140 (41 profiles)" while the run did 21, because the label
+   counted the whole search and the action then filtered out everything that
+   already had a photo and a check inside 14 days. The count on a button is a
+   promise about what clicking it will do. Both now come from one function,
+   `needsRecheck`, and the label reads "21 of 41 profiles" when they differ.
+   Ticking the box redraws the label.
+
+2. **"Recently checked" never sorted anything.** `checkedAt` is written as a
+   NUMBER by `startActivityCheck` (`Date.now()`) and as an ISO STRING by
+   `saveActivity` (`toISOString()`), and the comparator subtracted them raw.
+   String minus string is NaN, and a comparator that returns NaN leaves the
+   order alone. `timeOf()` now parses either shape, new writes are ISO to match
+   the field table, and no migration is needed because the comparator reads
+   both. `tests/filters.test.mjs` mixes the two shapes deliberately and fails
+   on the old comparator.
 
 ### 7.6 The strategic question, answered 2026-09-20
 

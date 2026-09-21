@@ -311,7 +311,7 @@ ok('picking a search shows only that search', view.cards > 0 && view.cards <= 12
 ok('and no other search bleeds in', view.dividers === 0);
 ok('the count line says what is being shown', /Showing \d+ of 24 . Search 2/.test(view.count), view.count);
 ok('the re-check button appears and names its scope',
-   view.btnShown && /Re-check Search 2 \(\d+ profiles?\)/.test(view.btn), view.btn);
+   view.btnShown && /Re-check Search 2 \((\d+|\d+ of \d+) profiles?\)/.test(view.btn), view.btn);
 
 head('RE-CHECKING ONE SEARCH (activity AND photos, for that search only)');
 const batch2 = await page.evaluate(async () => {
@@ -323,7 +323,36 @@ const batch2 = await page.evaluate(async () => {
   return { mine: rows.filter(x => x.batch === 2 && !x.gone && !x.restricted).map(x => x.nickname),
            others: rows.filter(x => x.batch !== 2).map(x => x.nickname) };
 });
+// The count on a button is a promise about what clicking it will do. With
+// the skip box ticked it used to advertise the whole search while the run
+// quietly did a fraction of it.
+await page.check('#asl-recheck-batch-skip');
+await page.waitForTimeout(800);
+const promised = await page.evaluate(async () => {
+  const db = await new Promise(r => { const q = indexedDB.open('asl_search_db'); q.onsuccess = () => r(q.result); });
+  const g = s => new Promise(r => { const t = db.transaction(s,'readonly').objectStore(s).getAll(); t.onsuccess = () => r(t.result); });
+  const rows = await g('results');
+  const pics = new Set((await g('avatars')).map(a => a.nickname));
+  db.close();
+  const fresh = Date.now() - 14 * 86400000;
+  const batch = rows.filter(x => x.batch === 2 && !x.gone && !x.restricted);
+  const todo = batch.filter(x => !(pics.has(x.nickname) && x.activityChecked && x.checkedAt &&
+                                   new Date(x.checkedAt).getTime() >= fresh)).length;
+  return { todo, total: batch.length,
+           label: document.getElementById('asl-recheck-batch').textContent };
+});
+const wantLabel = promised.todo === promised.total
+  ? '(' + promised.todo + ' profile' + (promised.todo === 1 ? '' : 's') + ')'
+  : '(' + promised.todo + ' of ' + promised.total + ' profiles)';
+ok('with the skip box ticked, the button says how many it will REALLY do',
+   promised.label.includes(wantLabel),
+   promised.label + '   expected to contain ' + wantLabel);
+
 await page.uncheck('#asl-recheck-batch-skip');          // force every one through
+await page.waitForTimeout(800);
+const allLabel = await page.textContent('#asl-recheck-batch');
+ok('and unticking it goes back to the whole search',
+   allLabel.includes('(' + promised.total + ' profile'), allLabel);
 await page.evaluate(() => { window.__req.length = 0; });
 dialogs.length = 0;
 await page.click('#asl-recheck-batch');

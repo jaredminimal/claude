@@ -12,9 +12,9 @@ function lift(name) {
   }
   return src.slice(start, end);
 }
-const code = ['isDeadEnd','batchSummaries','batchLabel'].map(lift).join('\n');
-const { isDeadEnd, batchSummaries, batchLabel } = new Function(code +
-  '\nreturn {isDeadEnd, batchSummaries, batchLabel};')();
+const code = ['isDeadEnd','batchSummaries','batchLabel','timeOf','sortProfiles'].map(lift).join('\n');
+const { isDeadEnd, batchSummaries, batchLabel, sortProfiles } = new Function(code +
+  '\nreturn {isDeadEnd, batchSummaries, batchLabel, sortProfiles};')();
 
 // Synthetic library resembling the real one: 3 searches + pre-batch records,
 // with deleted / private / fine profiles mixed in.
@@ -57,3 +57,32 @@ eq('counts match what selecting shows', sums.map(b => b.count), [10, 4, 3, 2]);
 console.log('\nDropdown as the user will see it:');
 console.log('  All searches');
 for (const b of sums) console.log('  ' + batchLabel(b));
+
+// ---------------------------------------------------------------------------
+// "Recently checked". checkedAt was written as a NUMBER by the activity check
+// and as an ISO STRING by the background refresh, and the comparator
+// subtracted them raw. String minus string is NaN, and a comparator that
+// returns NaN leaves the order alone - so this sort did nothing.
+// This fixture mixes both shapes on purpose; it fails on the old comparator.
+// ---------------------------------------------------------------------------
+const iso = ms => new Date(ms).toISOString();
+const T = Date.parse('2026-09-20T12:00:00Z');
+const mixed = [
+  { nickname: 'oldest-num',  checkedAt: T - 5 * DAY },            // number
+  { nickname: 'newest-iso',  checkedAt: iso(T - 1 * DAY) },       // string
+  { nickname: 'middle-num',  checkedAt: T - 3 * DAY },            // number
+  { nickname: 'second-iso',  checkedAt: iso(T - 2 * DAY) },       // string
+  { nickname: 'never',       checkedAt: null },
+];
+eq('Recently checked orders newest first across BOTH stored shapes',
+   sortProfiles(mixed, 'checked').map(p => p.nickname),
+   ['newest-iso', 'second-iso', 'middle-num', 'oldest-num', 'never']);
+
+const acts = [
+  { nickname: 'a', lastActivity: iso(T - 30 * DAY) },
+  { nickname: 'b', lastActivity: iso(T - 2 * DAY) },
+  { nickname: 'c', lastActivity: null },
+  { nickname: 'd', lastActivity: iso(T - 9 * DAY) },
+];
+eq('Last active orders newest first and puts the undated last',
+   sortProfiles(acts, 'activity').map(p => p.nickname), ['b', 'd', 'a', 'c']);

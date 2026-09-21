@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           FetLife ASL Search + Activity Filter
-// @version        9.8.0
+// @version        9.10.0
 // @namespace      https://github.com/jaredminimal/fetlife-asl-search
 // @description    Search FetLife profiles by age, sex, location, role — then filter by recent activity. Two-phase crawl with CSV export.
 // @match          https://fetlife.com/*
@@ -501,7 +501,7 @@
                         <select id="asl-batch" style="margin:0;flex:1;min-width:0"><option value="all">All searches</option></select>
                     </div>
                     <button class="asl-b" id="asl-recheck-batch" style="background:#d80;color:#fff;display:none">Re-check this search</button>
-                    <label class="fl" id="asl-recheck-batch-skip-wrap" style="display:none;margin:4px 0 0;text-transform:none;letter-spacing:0;font-size:12px;color:#999;font-weight:400"><input type="checkbox" id="asl-recheck-batch-skip" checked> Skip ones that already have a photo and a recent check</label>
+                    <label class="fl" id="asl-recheck-batch-skip-wrap" style="display:none;margin:4px 0 0;text-transform:none;letter-spacing:0;font-size:12px;color:#999;font-weight:400"><input type="checkbox" id="asl-recheck-batch-skip" checked> Skip ones that already have a photo and were checked in the last 14 days</label>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
                         <label class="fl" style="margin:0;white-space:nowrap">Sort by</label>
                         <select id="asl-sort" style="width:auto;margin:0">
@@ -642,6 +642,7 @@
         document.getElementById('asl-active-show-hidden').addEventListener('change', loadAndDisplayResults);
         document.getElementById('asl-remove-gone').addEventListener('click', removeGoneProfiles);
         document.getElementById('asl-recheck-batch').addEventListener('click', recheckSelectedSearch);
+        document.getElementById('asl-recheck-batch-skip').addEventListener('change', loadAndDisplayResults);
         let findTimer = null;
         for (const id of ['asl-find', 'asl-active-find']) {
             document.getElementById(id).addEventListener('input', () => {
@@ -1954,7 +1955,7 @@
             }
 
             p.activityChecked = true;
-            p.checkedAt = Date.now();
+            p.checkedAt = new Date().toISOString();
             if (result.error) {
                 // A failed request tells us nothing about whether they're active.
                 // Keep the existing lastActivity instead of wiping it — clearing
@@ -2033,6 +2034,15 @@
     // It names its scope in its own label, so scoping it to the dropdown is
     // not the trap the whole-set rule guards against: nothing here is
     // ambiguous about which profiles it will touch.
+    // The button's number and the number the run actually does have to come
+    // from the same test, or the button lies - which it did: it counted the
+    // whole search while the run skipped everything already complete.
+    function needsRecheck(p, havePics, freshAfter) {
+        return !(havePics.has(p.nickname) && p.activityChecked && p.checkedAt &&
+                 new Date(p.checkedAt).getTime() >= freshAfter);
+    }
+    const freshCheckCutoff = () => Date.now() - STALE_ACTIVITY_MS;
+
     function estimateMinutes(count) {
         const el = id => (document.getElementById(id) || {}).value;
         const avg = ((parseFloat(el('asl-act-min')) || 3) + (parseFloat(el('asl-act-max')) || 6)) / 2;
@@ -2057,9 +2067,8 @@
         const total = list.length;
         if (skip) {
             const have = await dbGetAvatarKeys();
-            const freshAfter = Date.now() - STALE_ACTIVITY_MS;
-            list = list.filter(p => !(have.has(p.nickname) && p.activityChecked && p.checkedAt &&
-                                      new Date(p.checkedAt).getTime() >= freshAfter));
+            const freshAfter = freshCheckCutoff();
+            list = list.filter(p => needsRecheck(p, have, freshAfter));
         }
         if (!list.length) {
             alert(total
@@ -2218,6 +2227,18 @@
         return div;
     }
 
+    // checkedAt has been written two ways: Date.now() by the activity check and
+    // an ISO string by the background refresh. "Recently checked" subtracted
+    // them raw, and subtracting strings gives NaN - a comparator that returns
+    // NaN leaves the order alone, so that sort has been doing nothing at all.
+    // Parse whatever is there; new writes are ISO, matching the field table.
+    function timeOf(v) {
+        if (!v) return 0;
+        if (typeof v === 'number') return v;
+        const t = new Date(v).getTime();
+        return isNaN(t) ? 0 : t;
+    }
+
     function sortProfiles(list, sortMode) {
         const sorted = [...list];
         if (sortMode === 'newest') {
@@ -2231,13 +2252,9 @@
         } else if (sortMode === 'age-desc') {
             sorted.sort((a, b) => (b.age || 0) - (a.age || 0));
         } else if (sortMode === 'checked') {
-            sorted.sort((a, b) => (b.checkedAt || 0) - (a.checkedAt || 0));
+            sorted.sort((a, b) => timeOf(b.checkedAt) - timeOf(a.checkedAt));
         } else { // 'activity'
-            sorted.sort((a, b) => {
-                const da = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
-                const db = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
-                return db - da;
-            });
+            sorted.sort((a, b) => timeOf(b.lastActivity) - timeOf(a.lastActivity));
         }
         return sorted;
     }
@@ -2758,6 +2775,9 @@
         };
         setDeadToggle('asl-hidden-wrap', 'asl-hidden-n', deadResults);
 
+        // Which nicknames have a photo. Keys only, so this stays cheap.
+        const picKeys = await dbGetAvatarKeys();
+
         // What the database actually holds for the list on screen. "Is this
         // working?" should be answerable by reading the panel, not by guessing
         // from the cards that happen to be scrolled into view.
@@ -2766,8 +2786,7 @@
             const pool = shownResults;
             if (!pool.length) { health.textContent = ''; }
             else {
-                const pics = await dbGetAvatarKeys();
-                const withPic = pool.filter(p => pics.has(p.nickname)).length;
+                const withPic = pool.filter(p => picKeys.has(p.nickname)).length;
                 const checked = pool.filter(p => p.activityChecked).length;
                 const dated = pool.filter(p => p.lastActivity).length;
                 const errs = {};
@@ -2821,9 +2840,18 @@
         const rbBtn = document.getElementById('asl-recheck-batch');
         const rbWrap = document.getElementById('asl-recheck-batch-skip-wrap');
         if (rbBtn) {
+            const skipOn = !!(document.getElementById('asl-recheck-batch-skip') || {}).checked;
+            const freshAfter = freshCheckCutoff();
+            const todo = skipOn
+                ? batchList.filter(p => needsRecheck(p, picKeys, freshAfter)).length
+                : batchList.length;
+            const who = rBatch === '0' ? 'earlier results' : 'Search ' + rBatch;
             rbBtn.style.display = batchList.length ? 'block' : 'none';
-            rbBtn.textContent = 'Re-check ' + (rBatch === '0' ? 'earlier results' : 'Search ' + rBatch) +
-                ' (' + batchList.length + ' profile' + (batchList.length === 1 ? '' : 's') + ')';
+            // When the skip box hides some of them, say so on the button. The
+            // count on a button is a promise about what clicking it will do.
+            rbBtn.textContent = todo === batchList.length
+                ? 'Re-check ' + who + ' (' + todo + ' profile' + (todo === 1 ? '' : 's') + ')'
+                : 'Re-check ' + who + ' (' + todo + ' of ' + batchList.length + ' profiles)';
         }
         if (rbWrap) rbWrap.style.display = batchList.length ? 'block' : 'none';
 
